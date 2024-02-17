@@ -10,6 +10,7 @@
 import os, openai, sys, json, inspect, uuid, datetime, threading
 from typing import Any, Literal, Union
 from functools import partial
+
 import dotenv, traceback, random, asyncio, time, contextvars
 from copy import deepcopy
 import httpx
@@ -2589,10 +2590,28 @@ def embedding(
                 model_response=EmbeddingResponse(),
             )
         elif custom_llm_provider == "ollama":
+            ollama_input = None
+            if isinstance(input, list) and len(input) > 1:
+                raise litellm.BadRequestError(
+                    message=f"Ollama Embeddings don't support batch embeddings",
+                    model=model,  # type: ignore
+                    llm_provider="ollama",  # type: ignore
+                )
+            if isinstance(input, list) and len(input) == 1:
+                ollama_input = "".join(input[0])
+            elif isinstance(input, str):
+                ollama_input = input
+            else:
+                raise litellm.BadRequestError(
+                    message=f"Invalid input for ollama embeddings. input={input}",
+                    model=model,  # type: ignore
+                    llm_provider="ollama",  # type: ignore
+                )
+
             if aembedding == True:
                 response = ollama.ollama_aembeddings(
                     model=model,
-                    prompt=input,
+                    prompt=ollama_input,
                     encoding=encoding,
                     logging_obj=logging,
                     optional_params=optional_params,
@@ -3178,6 +3197,7 @@ def image_generation(
                 "preset_cache_key": None,
                 "stream_response": {},
             },
+            custom_llm_provider=custom_llm_provider,
         )
 
         if custom_llm_provider == "azure":
