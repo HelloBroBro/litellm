@@ -687,6 +687,8 @@ async def user_api_key_auth(
                 elif route == "/model/info":
                     # /model/info just shows models user has access to
                     pass
+                elif route == "/user/request_model":
+                    pass  # this allows any user to request a model through the UI
                 elif allow_user_auth == True and route == "/key/generate":
                     pass
                 elif allow_user_auth == True and route == "/key/delete":
@@ -727,6 +729,7 @@ async def user_api_key_auth(
                 "/spend",
                 "/user",
                 "/model/info",
+                "/v2/model/info",
             ]
             # check if the current route startswith any of the allowed routes
             if (
@@ -1466,6 +1469,16 @@ class ProxyConfig:
                                     _ENTERPRISE_GoogleTextModeration()
                                 )
                                 imported_list.append(google_text_moderation_obj)
+                            elif (
+                                isinstance(callback, str)
+                                and callback == "llmguard_moderations"
+                            ):
+                                from litellm.proxy.enterprise.enterprise_hooks.llm_guard import (
+                                    _ENTERPRISE_LLMGuard,
+                                )
+
+                                llm_guard_moderation_obj = _ENTERPRISE_LLMGuard()
+                                imported_list.append(llm_guard_moderation_obj)
                             else:
                                 imported_list.append(
                                     get_instance_fn(
@@ -4121,6 +4134,101 @@ async def user_update(data: UpdateUserRequest):
         )
 
 
+@router.post(
+    "/user/request_model",
+    tags=["user management"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def user_request_model(request: Request):
+    """
+    Allow a user to create a request to access a model
+    """
+    global prisma_client
+    try:
+        data_json = await request.json()
+
+        # get the row from db
+        if prisma_client is None:
+            raise Exception("Not connected to DB!")
+
+        non_default_values = {k: v for k, v in data_json.items() if v is not None}
+        new_models = non_default_values.get("models", None)
+        user_id = non_default_values.get("user_id", None)
+        justification = non_default_values.get("justification", None)
+
+        response = await prisma_client.insert_data(
+            data={
+                "models": new_models,
+                "justification": justification,
+                "user_id": user_id,
+                "status": "pending",
+                "request_id": str(uuid.uuid4()),
+            },
+            table_name="user_notification",
+        )
+        return {"status": "success"}
+        # update based on remaining passed in values
+    except Exception as e:
+        traceback.print_exc()
+        if isinstance(e, HTTPException):
+            raise ProxyException(
+                message=getattr(e, "detail", f"Authentication Error({str(e)})"),
+                type="auth_error",
+                param=getattr(e, "param", "None"),
+                code=getattr(e, "status_code", status.HTTP_400_BAD_REQUEST),
+            )
+        elif isinstance(e, ProxyException):
+            raise e
+        raise ProxyException(
+            message="Authentication Error, " + str(e),
+            type="auth_error",
+            param=getattr(e, "param", "None"),
+            code=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+@router.get(
+    "/user/get_requests",
+    tags=["user management"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def user_get_requests():
+    """
+    Get all "Access" requests made by proxy users, access requests are requests for accessing models
+    """
+    global prisma_client
+    try:
+
+        # get the row from db
+        if prisma_client is None:
+            raise Exception("Not connected to DB!")
+
+        # TODO: Optimize this so we don't read all the data here, eventually move to pagination
+        response = await prisma_client.get_data(
+            query_type="find_all",
+            table_name="user_notification",
+        )
+        return {"requests": response}
+        # update based on remaining passed in values
+    except Exception as e:
+        traceback.print_exc()
+        if isinstance(e, HTTPException):
+            raise ProxyException(
+                message=getattr(e, "detail", f"Authentication Error({str(e)})"),
+                type="auth_error",
+                param=getattr(e, "param", "None"),
+                code=getattr(e, "status_code", status.HTTP_400_BAD_REQUEST),
+            )
+        elif isinstance(e, ProxyException):
+            raise e
+        raise ProxyException(
+            message="Authentication Error, " + str(e),
+            type="auth_error",
+            param=getattr(e, "param", "None"),
+            code=status.HTTP_400_BAD_REQUEST,
+        )
+
+
 #### TEAM MANAGEMENT ####
 
 
@@ -4326,6 +4434,82 @@ async def add_new_model(model_params: ModelParams):
             param=getattr(e, "param", "None"),
             code=status.HTTP_400_BAD_REQUEST,
         )
+
+
+@router.get(
+    "/v2/model/info",
+    description="v2 - returns all the models set on the config.yaml, shows 'user_access' = True if the user has access to the model. Provides more info about each model in /models, including config.yaml descriptions (except api key and api base)",
+    tags=["model management"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def model_info_v2(
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    global llm_model_list, general_settings, user_config_file_path, proxy_config
+
+    # Load existing config
+    config = await proxy_config.get_config()
+
+    all_models = config.get("model_list", [])
+    if user_model is not None:
+        # if user does not use a config.yaml, https://github.com/BerriAI/litellm/issues/2061
+        all_models += [user_model]
+
+    # check all models user has access to in user_api_key_dict
+    user_models = []
+    if len(user_api_key_dict.models) > 0:
+        user_models = user_api_key_dict.models
+
+    # for all models check if the user has access, and mark it as "user_access": `True` or `False`
+    for model in all_models:
+        model_name = model.get("model_name", None)
+        if model_name is not None:
+            user_has_access = model_name in user_models
+            if (
+                user_models == []
+            ):  # if user_api_key_dict.models == [], user has access to all models
+                user_has_access = True
+            model["user_access"] = user_has_access
+
+    # fill in model info based on config.yaml and litellm model_prices_and_context_window.json
+    for model in all_models:
+        # provided model_info in config.yaml
+        model_info = model.get("model_info", {})
+
+        # read litellm model_prices_and_context_window.json to get the following:
+        # input_cost_per_token, output_cost_per_token, max_tokens
+        litellm_model_info = get_litellm_model_info(model=model)
+
+        # 2nd pass on the model, try seeing if we can find model in litellm model_cost map
+        if litellm_model_info == {}:
+            # use litellm_param model_name to get model_info
+            litellm_params = model.get("litellm_params", {})
+            litellm_model = litellm_params.get("model", None)
+            try:
+                litellm_model_info = litellm.get_model_info(model=litellm_model)
+            except:
+                litellm_model_info = {}
+        # 3rd pass on the model, try seeing if we can find model but without the "/" in model cost map
+        if litellm_model_info == {}:
+            # use litellm_param model_name to get model_info
+            litellm_params = model.get("litellm_params", {})
+            litellm_model = litellm_params.get("model", None)
+            split_model = litellm_model.split("/")
+            if len(split_model) > 0:
+                litellm_model = split_model[-1]
+            try:
+                litellm_model_info = litellm.get_model_info(model=litellm_model)
+            except:
+                litellm_model_info = {}
+        for k, v in litellm_model_info.items():
+            if k not in model_info:
+                model_info[k] = v
+        model["model_info"] = model_info
+        # don't return the api key
+        model["litellm_params"].pop("api_key", None)
+
+    verbose_proxy_logger.debug(f"all_models: {all_models}")
+    return {"data": all_models}
 
 
 @router.get(
@@ -4981,8 +5165,26 @@ async def auth_callback(request: Request):
 
     if user_id is None:
         user_id = getattr(result, "first_name", "") + getattr(result, "last_name", "")
+    # get user_info from litellm DB
+    user_info = None
+    if prisma_client is not None:
+        user_info = await prisma_client.get_data(user_id=user_id, table_name="user")
+    user_id_models: List = []
+    if user_info is not None:
+        user_id_models = getattr(user_info, "models", [])
+
     response = await generate_key_helper_fn(
-        **{"duration": "1hr", "key_max_budget": 0.01, "models": [], "aliases": {}, "config": {}, "spend": 0, "user_id": user_id, "team_id": "litellm-dashboard", "user_email": user_email}  # type: ignore
+        **{
+            "duration": "1hr",
+            "key_max_budget": 0.01,
+            "models": user_id_models,
+            "aliases": {},
+            "config": {},
+            "spend": 0,
+            "user_id": user_id,
+            "team_id": "litellm-dashboard",
+            "user_email": user_email,
+        }  # type: ignore
     )
     key = response["token"]  # type: ignore
     user_id = response["user_id"]  # type: ignore
