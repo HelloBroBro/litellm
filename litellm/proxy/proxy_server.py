@@ -1479,6 +1479,26 @@ class ProxyConfig:
 
                                 llm_guard_moderation_obj = _ENTERPRISE_LLMGuard()
                                 imported_list.append(llm_guard_moderation_obj)
+                            elif (
+                                isinstance(callback, str)
+                                and callback == "blocked_user_check"
+                            ):
+                                from litellm.proxy.enterprise.enterprise_hooks.blocked_user_list import (
+                                    _ENTERPRISE_BlockedUserList,
+                                )
+
+                                blocked_user_list = _ENTERPRISE_BlockedUserList()
+                                imported_list.append(blocked_user_list)
+                            elif (
+                                isinstance(callback, str)
+                                and callback == "banned_keywords"
+                            ):
+                                from litellm.proxy.enterprise.enterprise_hooks.banned_keywords import (
+                                    _ENTERPRISE_BannedKeywords,
+                                )
+
+                                banned_keywords_obj = _ENTERPRISE_BannedKeywords()
+                                imported_list.append(banned_keywords_obj)
                             else:
                                 imported_list.append(
                                     get_instance_fn(
@@ -1864,6 +1884,11 @@ async def generate_key_helper_fn(
                     table_name="user",
                     update_key_values=update_key_values,
                 )
+            if user_id == litellm_proxy_budget_name:
+                # do not create a key for litellm_proxy_budget_name
+                # we only need to ensure this exists in the user table
+                # the LiteLLM_VerificationToken table will increase in size if we don't do this check
+                return key_data
 
             ## CREATE KEY
             verbose_proxy_logger.debug(f"prisma_client: Creating Key={key_data}")
@@ -4368,7 +4393,20 @@ async def update_team(
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
     """
-    add new members to the team
+    You can now add / delete users from a team via /team/update
+
+    ```
+    curl --location 'http://0.0.0.0:8000/team/update' \
+    
+    --header 'Authorization: Bearer sk-1234' \
+        
+    --header 'Content-Type: application/json' \
+    
+    --data-raw '{
+        "team_id": "45e3e396-ee08-4a61-a88e-16b3ce7e0849",
+        "members_with_roles": [{"role": "admin", "user_id": "5c4a0aa3-a1e1-43dc-bd87-3c2da8382a3a"}, {"role": "user", "user_id": "krrish247652@berri.ai"}]
+    }'
+    ```
     """
     global prisma_client
 
@@ -4449,6 +4487,18 @@ async def delete_team(
 ):
     """
     delete team and associated team keys
+
+    ```
+    curl --location 'http://0.0.0.0:8000/team/delete' \
+        
+    --header 'Authorization: Bearer sk-1234' \
+        
+    --header 'Content-Type: application/json' \
+    
+    --data-raw '{
+        "team_ids": ["45e3e396-ee08-4a61-a88e-16b3ce7e0849"]
+    }'
+    ```
     """
     global prisma_client
 

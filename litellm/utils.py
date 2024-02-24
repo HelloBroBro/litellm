@@ -55,6 +55,7 @@ encoding = tiktoken.get_encoding("cl100k_base")
 import importlib.metadata
 from ._logging import verbose_logger
 from .integrations.traceloop import TraceloopLogger
+from .integrations.athina import AthinaLogger
 from .integrations.helicone import HeliconeLogger
 from .integrations.aispend import AISpendLogger
 from .integrations.berrispend import BerriSpendLogger
@@ -114,6 +115,7 @@ posthog = None
 slack_app = None
 alerts_channel = None
 heliconeLogger = None
+athinaLogger = None
 promptLayerLogger = None
 langsmithLogger = None
 weightsBiasesLogger = None
@@ -258,11 +260,14 @@ class Message(OpenAIObject):
 
 
 class Delta(OpenAIObject):
-    def __init__(self, content=None, role=None, **params):
+    def __init__(
+        self, content=None, role=None, function_call=None, tool_calls=None, **params
+    ):
         super(Delta, self).__init__(**params)
         self.content = content
-        if role is not None:
-            self.role = role
+        self.role = role
+        self.function_call = function_call
+        self.tool_calls = tool_calls
 
     def __contains__(self, key):
         # Define custom behavior for the 'in' operator
@@ -1419,6 +1424,17 @@ class Logging:
                                 result = kwargs["complete_streaming_response"]
                                 # only add to cache once we have a complete streaming response
                                 litellm.cache.add_cache(result, **kwargs)
+                    if callback == "athina":
+                        deep_copy = {}
+                        for k, v in self.model_call_details.items():
+                            deep_copy[k] = v
+                        athinaLogger.log_event(
+                            kwargs=deep_copy,
+                            response_obj=result,
+                            start_time=start_time,
+                            end_time=end_time,
+                            print_verbose=print_verbose,
+                        )
                     if callback == "traceloop":
                         deep_copy = {}
                         for k, v in self.model_call_details.items():
@@ -3904,6 +3920,7 @@ def get_optional_params(
     max_retries=None,
     logprobs=None,
     top_logprobs=None,
+    extra_headers=None,
     **kwargs,
 ):
     # retrieve all parameters passed to the function
@@ -3943,6 +3960,7 @@ def get_optional_params(
         "max_retries": None,
         "logprobs": None,
         "top_logprobs": None,
+        "extra_headers": None,
     }
     # filter out those parameters that were passed with non-default values
     non_default_params = {
@@ -4274,8 +4292,8 @@ def get_optional_params(
                 optional_params["stop_sequences"] = stop
         if max_tokens is not None:
             optional_params["max_output_tokens"] = max_tokens
-    elif custom_llm_provider == "vertex_ai" and model in (
-        litellm.vertex_chat_models
+    elif custom_llm_provider == "vertex_ai" and (
+        model in litellm.vertex_chat_models
         or model in litellm.vertex_code_chat_models
         or model in litellm.vertex_text_models
         or model in litellm.vertex_code_text_models
@@ -4750,6 +4768,7 @@ def get_optional_params(
             "max_retries",
             "logprobs",
             "top_logprobs",
+            "extra_headers",
         ]
         _check_valid_arg(supported_params=supported_params)
         if functions is not None:
@@ -4790,6 +4809,8 @@ def get_optional_params(
             optional_params["logprobs"] = logprobs
         if top_logprobs is not None:
             optional_params["top_logprobs"] = top_logprobs
+        if extra_headers is not None:
+            optional_params["extra_headers"] = extra_headers
     if custom_llm_provider in ["openai", "azure"] + litellm.openai_compatible_providers:
         # for openai, azure we should pass the extra/passed params within `extra_body` https://github.com/openai/openai-python/blob/ac33853ba10d13ac149b1fa3ca6dba7d613065c9/src/openai/resources/models.py#L46
         extra_body = passed_params.pop("extra_body", {})
@@ -4841,6 +4862,10 @@ def get_llm_provider(
                 # deepinfra is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.endpoints.anyscale.com/v1
                 api_base = "https://api.deepinfra.com/v1/openai"
                 dynamic_api_key = get_secret("DEEPINFRA_API_KEY")
+            elif custom_llm_provider == "groq":
+                # groq is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.groq.com/openai/v1
+                api_base = "https://api.groq.com/openai/v1"
+                dynamic_api_key = get_secret("GROQ_API_KEY")
             elif custom_llm_provider == "mistral":
                 # mistral is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.mistral.ai
                 api_base = "https://api.mistral.ai/v1"
@@ -4878,6 +4903,9 @@ def get_llm_provider(
                     elif endpoint == "api.mistral.ai/v1":
                         custom_llm_provider = "mistral"
                         dynamic_api_key = get_secret("MISTRAL_API_KEY")
+                    elif endpoint == "api.groq.com/openai/v1":
+                        custom_llm_provider = "groq"
+                        dynamic_api_key = get_secret("GROQ_API_KEY")
                     return model, custom_llm_provider, dynamic_api_key, api_base
 
         # check if model in known model provider list  -> for huggingface models, raise exception as they don't have a fixed provider (can be togetherai, anyscale, baseten, runpod, et.)
@@ -5506,7 +5534,7 @@ def validate_environment(model: Optional[str] = None) -> dict:
 
 
 def set_callbacks(callback_list, function_id=None):
-    global sentry_sdk_instance, capture_exception, add_breadcrumb, posthog, slack_app, alerts_channel, traceloopLogger, heliconeLogger, aispendLogger, berrispendLogger, supabaseClient, liteDebuggerClient, llmonitorLogger, promptLayerLogger, langFuseLogger, customLogger, weightsBiasesLogger, langsmithLogger, dynamoLogger, s3Logger
+    global sentry_sdk_instance, capture_exception, add_breadcrumb, posthog, slack_app, alerts_channel, traceloopLogger, athinaLogger, heliconeLogger, aispendLogger, berrispendLogger, supabaseClient, liteDebuggerClient, llmonitorLogger, promptLayerLogger, langFuseLogger, customLogger, weightsBiasesLogger, langsmithLogger, dynamoLogger, s3Logger
     try:
         for callback in callback_list:
             print_verbose(f"callback: {callback}")
@@ -5561,6 +5589,9 @@ def set_callbacks(callback_list, function_id=None):
                 print_verbose(f"Initialized Slack App: {slack_app}")
             elif callback == "traceloop":
                 traceloopLogger = TraceloopLogger()
+            elif callback == "athina":
+                athinaLogger = AthinaLogger()
+                print_verbose("Initialized Athina Logger")
             elif callback == "helicone":
                 heliconeLogger = HeliconeLogger()
             elif callback == "llmonitor":
@@ -6823,6 +6854,14 @@ def exception_type(
                         model=model,
                         llm_provider="palm",
                         response=original_exception.response,
+                    )
+                if "504 Deadline expired before operation could complete." in error_str:
+                    exception_mapping_worked = True
+                    raise Timeout(
+                        message=f"PalmException - {original_exception.message}",
+                        model=model,
+                        llm_provider="palm",
+                        request=original_exception.request,
                     )
                 if "400 Request payload size exceeds" in error_str:
                     exception_mapping_worked = True
@@ -8675,8 +8714,37 @@ class CustomStreamWrapper:
                     ):
                         try:
                             delta = dict(original_chunk.choices[0].delta)
+                            ## AZURE - check if arguments is not None
+                            if (
+                                original_chunk.choices[0].delta.function_call
+                                is not None
+                            ):
+                                if (
+                                    getattr(
+                                        original_chunk.choices[0].delta.function_call,
+                                        "arguments",
+                                    )
+                                    is None
+                                ):
+                                    original_chunk.choices[
+                                        0
+                                    ].delta.function_call.arguments = ""
+                            elif original_chunk.choices[0].delta.tool_calls is not None:
+                                if isinstance(
+                                    original_chunk.choices[0].delta.tool_calls, list
+                                ):
+                                    for t in original_chunk.choices[0].delta.tool_calls:
+                                        if (
+                                            getattr(
+                                                t.function,
+                                                "arguments",
+                                            )
+                                            is None
+                                        ):
+                                            t.function.arguments = ""
                             model_response.choices[0].delta = Delta(**delta)
                         except Exception as e:
+                            traceback.print_exc()
                             model_response.choices[0].delta = Delta()
                     else:
                         return

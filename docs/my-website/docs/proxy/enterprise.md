@@ -1,7 +1,7 @@
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-# ✨ Enterprise Features - Content Moderation
+# ✨ Enterprise Features - Content Moderation, Blocked Users/Keywords
 
 Features here are behind a commercial license in our `/enterprise` folder. [**See Code**](https://github.com/BerriAI/litellm/tree/main/enterprise)
 
@@ -15,6 +15,8 @@ Features:
 - [ ] Content Moderation with LlamaGuard 
 - [ ] Content Moderation with Google Text Moderations 
 - [ ] Content Moderation with LLM Guard
+- [ ] Reject calls from Blocked User list 
+- [ ] Reject calls (incoming / outgoing) with Banned Keywords (e.g. competitors)
 - [ ] Tracking Spend for Custom Tags
  
 ## Content Moderation with LlamaGuard 
@@ -132,6 +134,63 @@ Here are the category specific values:
 
 
 
+## Enable Blocked User Lists 
+If any call is made to proxy with this user id, it'll be rejected - use this if you want to let users opt-out of ai features 
+
+```yaml
+litellm_settings: 
+     callbacks: ["blocked_user_check"] 
+     blocked_user_id_list: ["user_id_1", "user_id_2", ...]  # can also be a .txt filepath e.g. `/relative/path/blocked_list.txt` 
+```
+
+### How to test
+
+```bash 
+curl --location 'http://0.0.0.0:8000/chat/completions' \
+--header 'Content-Type: application/json' \
+--data ' {
+      "model": "gpt-3.5-turbo",
+      "messages": [
+        {
+          "role": "user",
+          "content": "what llm are you"
+        }
+      ],
+      "user_id": "user_id_1" # this is also an openai supported param 
+    }
+'
+```
+
+:::info 
+
+[Suggest a way to improve this](https://github.com/BerriAI/litellm/issues/new/choose)
+
+:::
+
+## Enable Banned Keywords List
+
+```yaml 
+litellm_settings: 
+     callbacks: ["banned_keywords"]
+     banned_keywords_list: ["hello"] # can also be a .txt file - e.g.: `/relative/path/keywords.txt`
+```
+
+### Test this 
+
+```bash
+curl --location 'http://0.0.0.0:8000/chat/completions' \
+--header 'Content-Type: application/json' \
+--data ' {
+      "model": "gpt-3.5-turbo",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello world!"
+        }
+      ]
+    }
+'
+```
 ## Tracking Spend for Custom Tags
 
 Requirements: 

@@ -60,6 +60,8 @@ llamaguard_model_name: Optional[str] = None
 presidio_ad_hoc_recognizers: Optional[str] = None
 google_moderation_confidence_threshold: Optional[float] = None
 llamaguard_unsafe_content_categories: Optional[str] = None
+blocked_user_list: Optional[Union[str, List]] = None
+banned_keywords_list: Optional[Union[str, List]] = None
 ##################
 logging: bool = True
 caching: bool = (
@@ -305,6 +307,7 @@ openai_compatible_endpoints: List = [
     "api.endpoints.anyscale.com/v1",
     "api.deepinfra.com/v1/openai",
     "api.mistral.ai/v1",
+    "api.groq.com/openai/v1",
     "api.together.xyz/v1",
 ]
 
@@ -312,6 +315,7 @@ openai_compatible_endpoints: List = [
 openai_compatible_providers: List = [
     "anyscale",
     "mistral",
+    "groq",
     "deepinfra",
     "perplexity",
     "xinference",
@@ -459,6 +463,7 @@ provider_list: List = [
     "perplexity",
     "anyscale",
     "mistral",
+    "groq",
     "maritalk",
     "voyage",
     "cloudflare",
