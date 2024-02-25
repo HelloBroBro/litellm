@@ -376,11 +376,9 @@ class StreamingChoices(OpenAIObject):
             self.delta = delta
         else:
             self.delta = Delta()
-
-        if logprobs is not None:
-            self.logprobs = logprobs
         if enhancements is not None:
             self.enhancements = enhancements
+        self.logprobs = logprobs
 
     def __contains__(self, key):
         # Define custom behavior for the 'in' operator
@@ -820,6 +818,8 @@ class Logging:
         ## DYNAMIC LANGFUSE KEYS ##
         self.langfuse_public_key = langfuse_public_key
         self.langfuse_secret = langfuse_secret
+        ## TIME TO FIRST TOKEN LOGGING ##
+        self.completion_start_time: Optional[datetime.datetime] = None
 
     def update_environment_variables(
         self, model, user, optional_params, litellm_params, **additional_params
@@ -840,6 +840,7 @@ class Logging:
             "user": user,
             "call_type": str(self.call_type),
             "litellm_call_id": self.litellm_call_id,
+            "completion_start_time": self.completion_start_time,
             **self.optional_params,
             **additional_params,
         }
@@ -1069,6 +1070,11 @@ class Logging:
                 start_time = self.start_time
             if end_time is None:
                 end_time = datetime.datetime.now()
+            if self.completion_start_time is None:
+                self.completion_start_time = end_time
+                self.model_call_details["completion_start_time"] = (
+                    self.completion_start_time
+                )
             self.model_call_details["log_event_type"] = "successful_api_call"
             self.model_call_details["end_time"] = end_time
             self.model_call_details["cache_hit"] = cache_hit
@@ -1358,7 +1364,7 @@ class Logging:
                                 f"is complete_streaming_response in kwargs: {kwargs.get('complete_streaming_response', None)}"
                             )
                             if complete_streaming_response is None:
-                                break
+                                continue
                             else:
                                 print_verbose("reaches langfuse for streaming logging!")
                                 result = kwargs["complete_streaming_response"]
@@ -4300,6 +4306,7 @@ def get_optional_params(
         or model in litellm.vertex_language_models
         or model in litellm.vertex_embedding_models
     ):
+        print_verbose(f"(start) INSIDE THE VERTEX AI OPTIONAL PARAM BLOCK")
         ## check if unsupported param passed in
         supported_params = [
             "temperature",
@@ -4333,6 +4340,9 @@ def get_optional_params(
             optional_params["tools"] = [
                 generative_models.Tool(function_declarations=gtool_func_declarations)
             ]
+        print_verbose(
+            f"(end) INSIDE THE VERTEX AI OPTIONAL PARAM BLOCK - optional_params: {optional_params}"
+        )
     elif custom_llm_provider == "sagemaker":
         ## check if unsupported param passed in
         supported_params = ["stream", "temperature", "max_tokens", "top_p", "stop", "n"]
@@ -4748,6 +4758,7 @@ def get_optional_params(
             extra_body  # openai client supports `extra_body` param
         )
     else:  # assume passing in params for openai/azure openai
+        print_verbose(f"UNMAPPED PROVIDER, ASSUMING IT'S OPENAI/AZUREs")
         supported_params = [
             "functions",
             "function_call",
@@ -4823,6 +4834,7 @@ def get_optional_params(
         for k in passed_params.keys():
             if k not in default_params.keys():
                 optional_params[k] = passed_params[k]
+    print_verbose(f"Final returned optional params: {optional_params}")
     return optional_params
 
 
@@ -8623,6 +8635,10 @@ class CustomStreamWrapper:
                     model_response.choices[0].finish_reason = response_obj[
                         "finish_reason"
                     ]
+                if response_obj.get("original_chunk", None) is not None:
+                    model_response.system_fingerprint = getattr(
+                        response_obj["original_chunk"], "system_fingerprint", None
+                    )
                 if response_obj["logprobs"] is not None:
                     model_response.choices[0].logprobs = response_obj["logprobs"]
 
