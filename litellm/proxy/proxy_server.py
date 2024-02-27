@@ -698,14 +698,20 @@ async def user_api_key_auth(
                     # user can only access this route if
                     # - api_key they need logs for has the same user_id as the one used for auth
                     query_params = request.query_params
-                    api_key = query_params.get(
-                        "api_key"
-                    )  # UI, will only pass hashed tokens
-                    token_info = await prisma_client.get_data(
-                        token=api_key, table_name="key", query_type="find_unique"
-                    )
-                    if secrets.compare_digest(token_info.user_id, valid_token.user_id):
-                        pass
+                    if query_params.get("api_key") is not None:
+                        api_key = query_params.get("api_key")
+                        token_info = await prisma_client.get_data(
+                            token=api_key, table_name="key", query_type="find_unique"
+                        )
+                        if secrets.compare_digest(
+                            token_info.user_id, valid_token.user_id
+                        ):
+                            pass
+                    elif query_params.get("user_id") is not None:
+                        user_id = query_params.get("user_id")
+                        # check if user id == token.user_id
+                        if secrets.compare_digest(user_id, valid_token.user_id):
+                            pass
                     else:
                         raise HTTPException(
                             status_code=status.HTTP_403_FORBIDDEN,
@@ -730,6 +736,7 @@ async def user_api_key_auth(
                 "/user",
                 "/model/info",
                 "/v2/model/info",
+                "/v2/key/info",
                 "/models",
                 "/v1/models",
             ]
@@ -3782,6 +3789,17 @@ async def view_spend_logs(
 -H "Authorization: Bearer sk-1234"
     ```
     """
+    if os.getenv("CLICKHOUSE_HOST") is not None:
+        # gettting spend logs from clickhouse
+        from litellm.proxy.enterprise.utils import view_spend_logs_from_clickhouse
+
+        return await view_spend_logs_from_clickhouse(
+            api_key=api_key,
+            user_id=user_id,
+            request_id=request_id,
+            start_date=start_date,
+            end_date=end_date,
+        )
     global prisma_client
     try:
         verbose_proxy_logger.debug("inside view_spend_logs")
@@ -6005,7 +6023,6 @@ async def health_readiness():
             except Exception as e:
                 index_info = "index does not exist - error: " + str(e)
             cache_type = {"type": cache_type, "index_info": index_info}
-
     if prisma_client is not None:  # if db passed in, check if it's connected
         await prisma_client.health_check()  # test the db connection
         response_object = {"db": "connected"}

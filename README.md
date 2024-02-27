@@ -68,6 +68,8 @@ response = completion(model="command-nightly", messages=messages)
 print(response)
 ```
 
+Call any model supported by a provider, with `model=<provider_name>/<model_name>`. There might be provider-specific details here, so refer to [provider docs for more information](https://docs.litellm.ai/docs/providers)
+
 ## Async ([Docs](https://docs.litellm.ai/docs/completion/stream#async-completion))
 
 ```python
