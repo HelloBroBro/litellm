@@ -205,18 +205,18 @@ def map_finish_reason(
 
 class FunctionCall(OpenAIObject):
     arguments: str
-    name: str
+    name: Optional[str] = None
 
 
 class Function(OpenAIObject):
     arguments: str
-    name: str
+    name: Optional[str] = None
 
 
 class ChatCompletionDeltaToolCall(OpenAIObject):
-    id: str
+    id: Optional[str] = None
     function: Function
-    type: str
+    type: Optional[str] = None
     index: int
 
 
@@ -275,13 +275,19 @@ class Delta(OpenAIObject):
         super(Delta, self).__init__(**params)
         self.content = content
         self.role = role
-        self.function_call = function_call
-        if tool_calls is not None and isinstance(tool_calls, dict):
+        if function_call is not None and isinstance(function_call, dict):
+            self.function_call = FunctionCall(**function_call)
+        else:
+            self.function_call = function_call
+        if tool_calls is not None and isinstance(tool_calls, list):
             self.tool_calls = []
             for tool_call in tool_calls:
-                if tool_call.get("index", None) is None:
-                    tool_call["index"] = 0
-                self.tool_calls.append(ChatCompletionDeltaToolCall(**tool_call))
+                if isinstance(tool_call, dict):
+                    if tool_call.get("index", None) is None:
+                        tool_call["index"] = 0
+                    self.tool_calls.append(ChatCompletionDeltaToolCall(**tool_call))
+                elif isinstance(tool_call, ChatCompletionDeltaToolCall):
+                    self.tool_calls.append(tool_call)
         else:
             self.tool_calls = tool_calls
 
@@ -1183,7 +1189,7 @@ class Logging:
             verbose_logger.debug(f"success callbacks: {litellm.success_callback}")
             ## BUILD COMPLETE STREAMED RESPONSE
             complete_streaming_response = None
-            if self.stream:
+            if self.stream and isinstance(result, ModelResponse):
                 if (
                     result.choices[0].finish_reason is not None
                 ):  # if it's the last chunk
@@ -4285,9 +4291,7 @@ def get_optional_params(
         if max_tokens is not None:
             optional_params["max_tokens"] = max_tokens
         if frequency_penalty is not None:
-            optional_params["repetition_penalty"] = (
-                frequency_penalty  # https://docs.together.ai/reference/inference
-            )
+            optional_params["frequency_penalty"] = frequency_penalty
         if stop is not None:
             optional_params["stop"] = stop
         if tools is not None:
@@ -4353,6 +4357,7 @@ def get_optional_params(
         or model in litellm.vertex_code_text_models
         or model in litellm.vertex_language_models
         or model in litellm.vertex_embedding_models
+        or model in litellm.vertex_vision_models
     ):
         print_verbose(f"(start) INSIDE THE VERTEX AI OPTIONAL PARAM BLOCK")
         ## check if unsupported param passed in
@@ -4928,7 +4933,7 @@ def get_llm_provider(
                 dynamic_api_key = get_secret("GROQ_API_KEY")
             elif custom_llm_provider == "mistral":
                 # mistral is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.mistral.ai
-                api_base = "https://api.mistral.ai/v1"
+                api_base = api_base or "https://api.mistral.ai/v1"
                 dynamic_api_key = get_secret("MISTRAL_API_KEY")
             elif custom_llm_provider == "voyage":
                 # voyage is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.voyageai.com/v1
@@ -8682,6 +8687,8 @@ class CustomStreamWrapper:
 
                 completion_obj["content"] = response_obj["text"]
                 print_verbose(f"completion obj content: {completion_obj['content']}")
+                if hasattr(chunk, "id"):
+                    model_response.id = chunk.id
                 if response_obj["is_finished"]:
                     model_response.choices[0].finish_reason = response_obj[
                         "finish_reason"
@@ -8704,6 +8711,8 @@ class CustomStreamWrapper:
                     model_response.system_fingerprint = getattr(
                         response_obj["original_chunk"], "system_fingerprint", None
                     )
+                    if hasattr(response_obj["original_chunk"], "id"):
+                        model_response.id = response_obj["original_chunk"].id
                 if response_obj["logprobs"] is not None:
                     model_response.choices[0].logprobs = response_obj["logprobs"]
 
@@ -8725,7 +8734,7 @@ class CustomStreamWrapper:
                         or original_chunk.choices[0].delta.tool_calls is not None
                     ):
                         try:
-                            delta = dict(original_chunk.choices[0].delta)
+                            delta = original_chunk.choices[0].delta
                             model_response.system_fingerprint = (
                                 original_chunk.system_fingerprint
                             )
@@ -8760,7 +8769,9 @@ class CustomStreamWrapper:
                                                 is None
                                             ):
                                                 t.function.arguments = ""
-                            model_response.choices[0].delta = Delta(**delta)
+                            _json_delta = delta.model_dump()
+                            print_verbose(f"_json_delta: {_json_delta}")
+                            model_response.choices[0].delta = Delta(**_json_delta)
                         except Exception as e:
                             traceback.print_exc()
                             model_response.choices[0].delta = Delta()

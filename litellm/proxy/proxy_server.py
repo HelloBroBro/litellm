@@ -239,6 +239,8 @@ health_check_interval = None
 health_check_results = {}
 queue: List = []
 litellm_proxy_budget_name = "litellm-proxy-budget"
+proxy_budget_rescheduler_min_time = 597
+proxy_budget_rescheduler_max_time = 605
 ### INITIALIZE GLOBAL LOGGING OBJECT ###
 proxy_logging_obj = ProxyLogging(user_api_key_cache=user_api_key_cache)
 ### REDIS QUEUE ###
@@ -332,8 +334,7 @@ async def user_api_key_auth(
         # note: never string compare api keys, this is vulenerable to a time attack. Use secrets.compare_digest instead
         is_master_key_valid = secrets.compare_digest(api_key, master_key)
         if is_master_key_valid:
-            return UserAPIKeyAuth(api_key=master_key)
-
+            return UserAPIKeyAuth(api_key=master_key, user_role="proxy_admin")
         if isinstance(
             api_key, str
         ):  # if generated token, make sure it starts with sk-.
@@ -356,7 +357,7 @@ async def user_api_key_auth(
             verbose_proxy_logger.debug(f"api key: {api_key}")
             if prisma_client is not None:
                 valid_token = await prisma_client.get_data(
-                    token=api_key,
+                    token=api_key, table_name="combined_view"
                 )
 
             elif custom_db_client is not None:
@@ -381,7 +382,8 @@ async def user_api_key_auth(
             # 4. If token is expired
             # 5. If token spend is under Budget for the token
             # 6. If token spend per model is under budget per model
-
+            # 7. If token spend is under team budget
+            # 8. If team spend is under team budget
             request_data = await _read_request_body(
                 request=request
             )  # request data, used across all checks. Making this easily available
@@ -610,6 +612,47 @@ async def user_api_key_auth(
                                 f"ExceededModelBudget: Current spend for model: {current_model_spend}; Max Budget for Model: {current_model_budget}"
                             )
 
+            # Check 6. Token spend is under Team budget
+            if (
+                valid_token.spend is not None
+                and hasattr(valid_token, "team_max_budget")
+                and valid_token.team_max_budget is not None
+            ):
+                asyncio.create_task(
+                    proxy_logging_obj.budget_alerts(
+                        user_max_budget=valid_token.team_max_budget,
+                        user_current_spend=valid_token.spend,
+                        type="token_budget",
+                        user_info=valid_token,
+                    )
+                )
+
+                if valid_token.spend >= valid_token.team_max_budget:
+                    raise Exception(
+                        f"ExceededTokenBudget: Current spend for token: {valid_token.spend}; Max Budget for Team: {valid_token.team_max_budget}"
+                    )
+
+            # Check 7. Team spend is under Team budget
+            if (
+                hasattr(valid_token, "team_spend")
+                and valid_token.team_spend is not None
+                and hasattr(valid_token, "team_max_budget")
+                and valid_token.team_max_budget is not None
+            ):
+                asyncio.create_task(
+                    proxy_logging_obj.budget_alerts(
+                        user_max_budget=valid_token.team_max_budget,
+                        user_current_spend=valid_token.team_spend,
+                        type="token_budget",
+                        user_info=valid_token,
+                    )
+                )
+
+                if valid_token.team_spend >= valid_token.team_max_budget:
+                    raise Exception(
+                        f"ExceededTokenBudget: Current Team Spend: {valid_token.team_spend}; Max Budget for Team: {valid_token.team_max_budget}"
+                    )
+
             # Token passed all checks
             api_key = valid_token.token
 
@@ -752,7 +795,9 @@ async def user_api_key_auth(
                 pass
             else:
                 if _is_user_proxy_admin(user_id_information):
-                    pass
+                    return UserAPIKeyAuth(
+                        api_key=api_key, user_role="proxy_admin", **valid_token_dict
+                    )
                 else:
                     raise Exception(
                         f"This key is made for LiteLLM UI, Tried to access route: {route}. Not allowed"
@@ -1363,7 +1408,7 @@ class ProxyConfig:
         """
         Load config values into proxy global state
         """
-        global master_key, user_config_file_path, otel_logging, user_custom_auth, user_custom_auth_path, user_custom_key_generate, use_background_health_checks, health_check_interval, use_queue, custom_db_client
+        global master_key, user_config_file_path, otel_logging, user_custom_auth, user_custom_auth_path, user_custom_key_generate, use_background_health_checks, health_check_interval, use_queue, custom_db_client, proxy_budget_rescheduler_max_time, proxy_budget_rescheduler_min_time
 
         # Load existing config
         config = await self.get_config(config_file_path=config_file_path)
@@ -1670,6 +1715,13 @@ class ProxyConfig:
                 )
             ## COST TRACKING ##
             cost_tracking()
+            ## BUDGET RESCHEDULER ##
+            proxy_budget_rescheduler_min_time = general_settings.get(
+                "proxy_budget_rescheduler_min_time", proxy_budget_rescheduler_min_time
+            )
+            proxy_budget_rescheduler_max_time = general_settings.get(
+                "proxy_budget_rescheduler_max_time", proxy_budget_rescheduler_max_time
+            )
             ### BACKGROUND HEALTH CHECKS ###
             # Enable background health checks
             use_background_health_checks = general_settings.get(
@@ -1870,14 +1922,6 @@ async def generate_key_helper_fn(
             saved_token["expires"], datetime
         ):
             saved_token["expires"] = saved_token["expires"].isoformat()
-        if key_data["token"] is not None and isinstance(key_data["token"], str):
-            hashed_token = hash_token(key_data["token"])
-            saved_token["token"] = hashed_token
-            user_api_key_cache.set_cache(
-                key=hashed_token,
-                value=LiteLLM_VerificationToken(**saved_token),  # type: ignore
-                ttl=600,
-            )
         if prisma_client is not None:
             ## CREATE USER (If necessary)
             verbose_proxy_logger.debug(f"prisma_client: Creating User={user_data}")
@@ -2080,9 +2124,9 @@ async def async_data_generator(response, user_api_key_dict):
     try:
         start_time = time.time()
         async for chunk in response:
-            verbose_proxy_logger.debug(f"returned chunk: {chunk}")
+            chunk = chunk.model_dump_json(exclude_none=True)
             try:
-                yield f"data: {json.dumps(chunk.dict())}\n\n"
+                yield f"data: {chunk}\n\n"
             except Exception as e:
                 yield f"data: {str(e)}\n\n"
 
@@ -2161,7 +2205,7 @@ def parse_cache_control(cache_control):
 
 @router.on_event("startup")
 async def startup_event():
-    global prisma_client, master_key, use_background_health_checks, llm_router, llm_model_list, general_settings
+    global prisma_client, master_key, use_background_health_checks, llm_router, llm_model_list, general_settings, proxy_budget_rescheduler_min_time, proxy_budget_rescheduler_max_time
     import json
 
     ### LOAD MASTER KEY ###
@@ -2263,11 +2307,16 @@ async def startup_event():
             duration=None, models=[], aliases={}, config={}, spend=0, token=master_key
         )
 
+    ### CHECK IF VIEW EXISTS ###
+    if prisma_client is not None:
+        create_view_response = await prisma_client.check_view_exists()
+        print(f"create_view_response: {create_view_response}")  # noqa
+
     ### START BUDGET SCHEDULER ###
     if prisma_client is not None:
         scheduler = AsyncIOScheduler()
         interval = random.randint(
-            597, 605
+            proxy_budget_rescheduler_min_time, proxy_budget_rescheduler_max_time
         )  # random interval, so multiple workers avoid resetting budget at the same time
         scheduler.add_job(
             reset_budget, "interval", seconds=interval, args=[prisma_client]
@@ -3793,13 +3842,55 @@ async def view_spend_logs(
         # gettting spend logs from clickhouse
         from litellm.proxy.enterprise.utils import view_spend_logs_from_clickhouse
 
-        return await view_spend_logs_from_clickhouse(
-            api_key=api_key,
-            user_id=user_id,
-            request_id=request_id,
+        daily_metrics = await view_daily_metrics(
             start_date=start_date,
             end_date=end_date,
         )
+
+        # get the top api keys across all daily_metrics
+        top_api_keys = {}  # type: ignore
+
+        # make this compatible with the admin UI
+        for response in daily_metrics.get("daily_spend", {}):
+            response["startTime"] = response["day"]
+            response["spend"] = response["daily_spend"]
+            response["models"] = response["spend_per_model"]
+            response["users"] = {"ishaan": 0.0}
+            spend_per_api_key = response["spend_per_api_key"]
+
+            # insert spend_per_api_key key, values in response
+            for key, value in spend_per_api_key.items():
+                response[key] = value
+                top_api_keys[key] = top_api_keys.get(key, 0.0) + value
+
+            del response["day"]
+            del response["daily_spend"]
+            del response["spend_per_model"]
+            del response["spend_per_api_key"]
+
+        # get top 5 api keys
+        top_api_keys = sorted(top_api_keys.items(), key=lambda x: x[1], reverse=True)  # type: ignore
+        top_api_keys = top_api_keys[:5]  # type: ignore
+        top_api_keys = dict(top_api_keys)  # type: ignore
+        """
+        set it like this 
+        {
+            "key" : key,
+            "spend:" : spend
+        }
+        """
+        # we need this to show on the Admin UI
+        response_keys = []
+        for key in top_api_keys.items():
+            response_keys.append(
+                {
+                    "key": key[0],
+                    "spend": key[1],
+                }
+            )
+        daily_metrics["top_api_keys"] = response_keys
+
+        return daily_metrics
     global prisma_client
     try:
         verbose_proxy_logger.debug("inside view_spend_logs")
@@ -3934,6 +4025,61 @@ async def view_spend_logs(
 
         return None
 
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise ProxyException(
+                message=getattr(e, "detail", f"/spend/logs Error({str(e)})"),
+                type="internal_error",
+                param=getattr(e, "param", "None"),
+                code=getattr(e, "status_code", status.HTTP_500_INTERNAL_SERVER_ERROR),
+            )
+        elif isinstance(e, ProxyException):
+            raise e
+        raise ProxyException(
+            message="/spend/logs Error" + str(e),
+            type="internal_error",
+            param=getattr(e, "param", "None"),
+            code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@router.get(
+    "/daily_metrics",
+    summary="Get daily spend metrics",
+    tags=["budget & spend Tracking"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def view_daily_metrics(
+    start_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="Time from which to start viewing key spend",
+    ),
+    end_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="Time till which to view key spend",
+    ),
+):
+    """ """
+    try:
+        if os.getenv("CLICKHOUSE_HOST") is not None:
+            # gettting spend logs from clickhouse
+            from litellm.integrations import clickhouse
+
+            return clickhouse.build_daily_metrics()
+
+            # create a response object
+            """
+            {
+                "date": "2022-01-01",
+                "spend": 0.0,
+                "users": {},
+                "models": {},
+            }
+            """
+        else:
+            raise Exception(
+                "Clickhouse: Clickhouse host not set. Required for viewing /daily/metrics"
+            )
     except Exception as e:
         if isinstance(e, HTTPException):
             raise ProxyException(
@@ -4485,50 +4631,54 @@ async def new_team(
         data.team_id = str(uuid.uuid4())
 
     if (
-        data.tpm_limit is not None
-        and user_api_key_dict.tpm_limit is not None
-        and data.tpm_limit > user_api_key_dict.tpm_limit
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": f"tpm limit higher than user max. User tpm limit={user_api_key_dict.tpm_limit}"
-            },
-        )
+        user_api_key_dict.user_role is None
+        or user_api_key_dict.user_role != "proxy_admin"
+    ):  # don't restrict proxy admin
+        if (
+            data.tpm_limit is not None
+            and user_api_key_dict.tpm_limit is not None
+            and data.tpm_limit > user_api_key_dict.tpm_limit
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": f"tpm limit higher than user max. User tpm limit={user_api_key_dict.tpm_limit}"
+                },
+            )
 
-    if (
-        data.rpm_limit is not None
-        and user_api_key_dict.rpm_limit is not None
-        and data.rpm_limit > user_api_key_dict.rpm_limit
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": f"rpm limit higher than user max. User rpm limit={user_api_key_dict.rpm_limit}"
-            },
-        )
+        if (
+            data.rpm_limit is not None
+            and user_api_key_dict.rpm_limit is not None
+            and data.rpm_limit > user_api_key_dict.rpm_limit
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": f"rpm limit higher than user max. User rpm limit={user_api_key_dict.rpm_limit}"
+                },
+            )
 
-    if (
-        data.max_budget is not None
-        and user_api_key_dict.max_budget is not None
-        and data.max_budget > user_api_key_dict.max_budget
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": f"max budget higher than user max. User max budget={user_api_key_dict.max_budget}"
-            },
-        )
+        if (
+            data.max_budget is not None
+            and user_api_key_dict.max_budget is not None
+            and data.max_budget > user_api_key_dict.max_budget
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": f"max budget higher than user max. User max budget={user_api_key_dict.max_budget}"
+                },
+            )
 
-    if data.models is not None:
-        for m in data.models:
-            if m not in user_api_key_dict.models:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": f"Model not in allowed user models. User allowed models={user_api_key_dict.models}"
-                    },
-                )
+        if data.models is not None:
+            for m in data.models:
+                if m not in user_api_key_dict.models:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "error": f"Model not in allowed user models. User allowed models={user_api_key_dict.models}"
+                        },
+                    )
 
     if user_api_key_dict.user_id is not None:
         creating_user_in_list = False
@@ -5509,7 +5659,11 @@ async def login(request: Request):
                 "user_id": "litellm-dashboard",
             }
         key = response["token"]  # type: ignore
-        litellm_dashboard_ui = os.getenv("PROXY_BASE_URL", "") + "/ui/"
+        litellm_dashboard_ui = os.getenv("PROXY_BASE_URL", "")
+        if litellm_dashboard_ui.endswith("/"):
+            litellm_dashboard_ui += "ui/"
+        else:
+            litellm_dashboard_ui += "/ui/"
         import jwt
 
         jwt_token = jwt.encode(
@@ -5518,6 +5672,7 @@ async def login(request: Request):
                 "key": key,
                 "user_email": user_id,
                 "user_role": "app_admin",  # this is the path without sso - we can assume only admins will use this
+                "login_method": "username_password",
             },
             "secret",
             algorithm="HS256",
@@ -5809,6 +5964,7 @@ async def auth_callback(request: Request):
             "key": key,
             "user_email": user_email,
             "user_role": user_role,
+            "login_method": "sso",
         },
         "secret",
         algorithm="HS256",
