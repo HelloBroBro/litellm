@@ -239,6 +239,7 @@ health_check_interval = None
 health_check_results = {}
 queue: List = []
 litellm_proxy_budget_name = "litellm-proxy-budget"
+ui_access_mode: Literal["admin", "all"] = "all"
 proxy_budget_rescheduler_min_time = 597
 proxy_budget_rescheduler_max_time = 605
 ### INITIALIZE GLOBAL LOGGING OBJECT ###
@@ -1408,7 +1409,7 @@ class ProxyConfig:
         """
         Load config values into proxy global state
         """
-        global master_key, user_config_file_path, otel_logging, user_custom_auth, user_custom_auth_path, user_custom_key_generate, use_background_health_checks, health_check_interval, use_queue, custom_db_client, proxy_budget_rescheduler_max_time, proxy_budget_rescheduler_min_time
+        global master_key, user_config_file_path, otel_logging, user_custom_auth, user_custom_auth_path, user_custom_key_generate, use_background_health_checks, health_check_interval, use_queue, custom_db_client, proxy_budget_rescheduler_max_time, proxy_budget_rescheduler_min_time, ui_access_mode
 
         # Load existing config
         config = await self.get_config(config_file_path=config_file_path)
@@ -1715,6 +1716,10 @@ class ProxyConfig:
                 )
             ## COST TRACKING ##
             cost_tracking()
+            ## ADMIN UI ACCESS ##
+            ui_access_mode = general_settings.get(
+                "ui_access_mode", "all"
+            )  # can be either ["admin_only" or "all"]
             ## BUDGET RESCHEDULER ##
             proxy_budget_rescheduler_min_time = general_settings.get(
                 "proxy_budget_rescheduler_min_time", proxy_budget_rescheduler_min_time
@@ -2310,7 +2315,6 @@ async def startup_event():
     ### CHECK IF VIEW EXISTS ###
     if prisma_client is not None:
         create_view_response = await prisma_client.check_view_exists()
-        print(f"create_view_response: {create_view_response}")  # noqa
 
     ### START BUDGET SCHEDULER ###
     if prisma_client is not None:
@@ -3783,7 +3787,7 @@ async def view_spend_tags(
 
 @router.get(
     "/spend/logs",
-    tags=["budget & spend Tracking"],
+    tags=["Budget & Spend Tracking"],
     dependencies=[Depends(user_api_key_auth)],
     responses={
         200: {"model": List[LiteLLM_SpendLogs]},
@@ -4044,6 +4048,83 @@ async def view_spend_logs(
 
 
 @router.get(
+    "/global/spend/logs",
+    tags=["Budget & Spend Tracking"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def global_spend_logs():
+    """
+    [BETA] This is a beta endpoint. It will change.
+
+    Use this to get global spend (spend per day for last 30d). Admin-only endpoint
+
+    More efficient implementation of /spend/logs, by creating a view over the spend logs table.
+    """
+    global prisma_client
+
+    sql_query = """SELECT * FROM "MonthlyGlobalSpend";"""
+
+    response = await prisma_client.db.query_raw(query=sql_query)
+
+    return response
+
+
+@router.get(
+    "/global/spend/keys",
+    tags=["Budget & Spend Tracking"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def global_spend_keys(
+    limit: int = fastapi.Query(
+        default=None,
+        description="Number of keys to get. Will return Top 'n' keys.",
+    )
+):
+    """
+    [BETA] This is a beta endpoint. It will change.
+
+    Use this to get the top 'n' keys with the highest spend, ordered by spend.
+    """
+    global prisma_client
+
+    if prisma_client is None:
+        raise HTTPException(status_code=500, detail={"error": "No db connected"})
+    sql_query = f"""SELECT * FROM "Last30dKeysBySpend" LIMIT {limit};"""
+
+    response = await prisma_client.db.query_raw(query=sql_query)
+
+    return response
+
+
+@router.get(
+    "/global/spend/models",
+    tags=["Budget & Spend Tracking"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def global_spend_models(
+    limit: int = fastapi.Query(
+        default=None,
+        description="Number of models to get. Will return Top 'n' models.",
+    )
+):
+    """
+    [BETA] This is a beta endpoint. It will change.
+
+    Use this to get the top 'n' keys with the highest spend, ordered by spend.
+    """
+    global prisma_client
+
+    if prisma_client is None:
+        raise HTTPException(status_code=500, detail={"error": "No db connected"})
+
+    sql_query = f"""SELECT * FROM "Last30dModelsBySpend" LIMIT {limit};"""
+
+    response = await prisma_client.db.query_raw(query=sql_query)
+
+    return response
+
+
+@router.get(
     "/daily_metrics",
     summary="Get daily spend metrics",
     tags=["budget & spend Tracking"],
@@ -4059,7 +4140,11 @@ async def view_daily_metrics(
         description="Time till which to view key spend",
     ),
 ):
-    """ """
+    """
+    [BETA] This is a beta endpoint. It might change without notice.
+
+    Please give feedback - https://github.com/BerriAI/litellm/issues
+    """
     try:
         if os.getenv("CLICKHOUSE_HOST") is not None:
             # gettting spend logs from clickhouse
@@ -4369,12 +4454,32 @@ async def user_update(data: UpdateUserRequest):
             ):  # models default to [], spend defaults to 0, we should not reset these values
                 non_default_values[k] = v
 
-        response = await prisma_client.update_data(
-            user_id=data_json["user_id"],
-            data=non_default_values,
-            update_key_values=non_default_values,
-        )
-        return {"user_id": data_json["user_id"], **non_default_values}
+        ## ADD USER, IF NEW ##
+        if data.user_id is not None and len(data.user_id) == 0:
+            non_default_values["user_id"] = data.user_id  # type: ignore
+            await prisma_client.update_data(
+                user_id=data.user_id,
+                data=non_default_values,
+                table_name="user",
+            )
+        elif data.user_email is not None:
+            non_default_values["user_id"] = str(uuid.uuid4())
+            non_default_values["user_email"] = data.user_email
+            ## user email is not unique acc. to prisma schema -> future improvement
+            ### for now: check if it exists in db, if not - insert it
+            existing_user_row = await prisma_client.get_data(
+                key_val={"user_email": data.user_email},
+                table_name="user",
+                query_type="find_all",
+            )
+            if existing_user_row is None or (
+                isinstance(existing_user_row, list) and len(existing_user_row) == 0
+            ):
+                await prisma_client.insert_data(
+                    data=non_default_values, table_name="user"
+                )
+
+        return non_default_values
         # update based on remaining passed in values
     except Exception as e:
         traceback.print_exc()
@@ -4577,6 +4682,40 @@ async def unblock_user(data: BlockUsers):
     return {"blocked_users": litellm.blocked_user_list}
 
 
+@router.get(
+    "/user/get_users",
+    tags=["user management"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def get_users(
+    role: str = fastapi.Query(
+        default=None,
+        description="Either 'proxy_admin', 'proxy_viewer', 'app_owner', 'app_user'",
+    )
+):
+    """
+    [BETA] This could change without notice. Give feedback - https://github.com/BerriAI/litellm/issues
+
+    Get all users who are a specific `user_role`.
+
+    Used by the UI to populate the user lists.
+
+    Currently - admin-only endpoint.
+    """
+    global prisma_client
+
+    if prisma_client is None:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"No db connected. prisma client={prisma_client}"},
+        )
+    all_users = await prisma_client.get_data(
+        table_name="user", query_type="find_all", key_val={"user_role": role}
+    )
+
+    return all_users
+
+
 #### TEAM MANAGEMENT ####
 
 
@@ -4726,9 +4865,9 @@ async def update_team(
 ):
     """
     [BETA]
-    [DEPRECATED] - use the `/team/member_add` and `/team/member_remove` endpoints instead 
+    [RECOMMENDED] - use `/team/member_add` to add new team members instead 
 
-    You can now add / delete users from a team via /team/update
+    You can now update team budget / rate limits via /team/update
 
     ```
     curl --location 'http://0.0.0.0:8000/team/update' \
@@ -5725,7 +5864,7 @@ def get_image():
 @app.get("/sso/callback", tags=["experimental"])
 async def auth_callback(request: Request):
     """Verify login"""
-    global general_settings
+    global general_settings, ui_access_mode
     microsoft_client_id = os.getenv("MICROSOFT_CLIENT_ID", None)
     google_client_id = os.getenv("GOOGLE_CLIENT_ID", None)
     generic_client_id = os.getenv("GENERIC_CLIENT_ID", None)
@@ -5916,6 +6055,7 @@ async def auth_callback(request: Request):
         "user_email": user_email,
     }
     try:
+        user_role = None
         if prisma_client is not None:
             user_info = await prisma_client.get_data(user_id=user_id, table_name="user")
             verbose_proxy_logger.debug(
@@ -5927,6 +6067,7 @@ async def auth_callback(request: Request):
                     "user_id": getattr(user_info, "user_id", user_id),
                     "user_email": getattr(user_info, "user_id", user_email),
                 }
+                user_role = getattr(user_info, "user_role", None)
             elif litellm.default_user_params is not None and isinstance(
                 litellm.default_user_params, dict
             ):
@@ -5949,13 +6090,27 @@ async def auth_callback(request: Request):
     key = response["token"]  # type: ignore
     user_id = response["user_id"]  # type: ignore
     litellm_dashboard_ui = "/ui/"
-    user_role = "app_owner"
+    user_role = user_role or "app_owner"
     if (
         os.getenv("PROXY_ADMIN_ID", None) is not None
         and os.environ["PROXY_ADMIN_ID"] == user_id
     ):
         # checks if user is admin
         user_role = "app_admin"
+
+    verbose_proxy_logger.debug(
+        f"user_role: {user_role}; ui_access_mode: {ui_access_mode}"
+    )
+    ## CHECK IF ROLE ALLOWED TO USE PROXY ##
+    if ui_access_mode == "admin_only" and "admin" not in user_role:
+        verbose_proxy_logger.debug("EXCEPTION RAISED")
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": f"User not allowed to access proxy. User role={user_role}, proxy mode={ui_access_mode}"
+            },
+        )
+
     import jwt
 
     jwt_token = jwt.encode(
