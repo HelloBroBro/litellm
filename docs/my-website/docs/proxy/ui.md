@@ -2,7 +2,7 @@ import Image from '@theme/IdealImage';
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-# 🔑 [BETA] Proxy UI 
+# [BETA] Proxy UI 
 ### **Create + delete keys through a UI**
 
 [Let users create their own keys](#setup-ssoauth-for-ui)
@@ -185,6 +185,20 @@ export PROXY_ADMIN_ID="116544810872468347480"
 If you don't see all your keys this could be due to a cached token. So just re-login and it should work.
 
 :::
+
+### Restrict UI Access
+
+You can restrict UI Access to just admins - includes you (proxy_admin) and people you give view only access to (proxy_admin_viewer) for seeing global spend.
+
+**Step 1. Set 'admin_only' access**
+```yaml
+general_settings:
+    ui_access_mode: "admin_only"
+```
+
+**Step 2. Invite view-only users**
+
+<Image img={require('../../img/admin_ui_viewer.png')} />
 
 ### Custom Branding Admin UI
 
