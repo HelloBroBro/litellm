@@ -21,7 +21,7 @@ import {
   BarList,
   Metric,
 } from "@tremor/react";
-import { keySpendLogsCall } from "./networking";
+import { keySpendLogsCall, PredictedSpendLogsCall } from "./networking";
 
 interface ViewKeySpendReportProps {
   token: string;
@@ -48,6 +48,7 @@ const ViewKeySpendReport: React.FC<ViewKeySpendReportProps> = ({
   const [data, setData] = useState<{ day: string; spend: number }[] | null>(
     null
   );
+  const [predictedSpendString, setPredictedSpendString] = useState("");
   const [userData, setUserData] = useState<
     { name: string; value: number }[] | null
   >(null);
@@ -79,6 +80,19 @@ const ViewKeySpendReport: React.FC<ViewKeySpendReportProps> = ({
       );
       console.log("Response:", response);
       setData(response);
+
+      // predict spend based on response
+      const predictedSpend = await PredictedSpendLogsCall(accessToken, response);
+      console.log("Response2:", predictedSpend);
+
+      // append predictedSpend to data
+      const combinedData = [...response, ...predictedSpend.response];
+      setData(combinedData);
+      setPredictedSpendString(predictedSpend.predicted_spend)
+
+      console.log("Combined Data:", combinedData);
+      // setPredictedSpend(predictedSpend);
+      
     } catch (error) {
       console.error("There was an error fetching the data", error);
     }
@@ -96,7 +110,7 @@ const ViewKeySpendReport: React.FC<ViewKeySpendReportProps> = ({
       </Button>
       <Modal
         visible={isModalVisible}
-        width={1000}
+        width={1400}
         onOk={handleOk}
         onCancel={handleCancel}
         footer={null}
@@ -104,16 +118,17 @@ const ViewKeySpendReport: React.FC<ViewKeySpendReportProps> = ({
         <Title style={{ textAlign: "left" }}>Key Name: {keyName}</Title>
 
         <Metric>Monthly Spend ${keySpend}</Metric>
+        <Title>{predictedSpendString}</Title>
 
         <Card className="mt-6 mb-6">
           {data && (
             <BarChart
               className="mt-6"
               data={data}
-              colors={["blue"]}
+              colors={["blue", "amber"]}
               index="date"
-              categories={["spend"]}
-              yAxisWidth={48}
+              categories={["spend", "predicted_spend"]}
+              yAxisWidth={80}
             />
           )}
         </Card>

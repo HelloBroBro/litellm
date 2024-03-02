@@ -786,6 +786,7 @@ async def user_api_key_auth(
                 "/global/spend/logs",
                 "/global/spend/keys",
                 "/global/spend/models",
+                "/global/predict/spend/logs",
             ]
             # check if the current route startswith any of the allowed routes
             if (
@@ -4140,12 +4141,12 @@ async def global_spend_keys(
     return response
 
 
-@router.get(
+@router.post(
     "/global/spend/end_users",
     tags=["Budget & Spend Tracking"],
     dependencies=[Depends(user_api_key_auth)],
 )
-async def global_spend_end_users():
+async def global_spend_end_users(data: Optional[GlobalEndUsersSpend] = None):
     """
     [BETA] This is a beta endpoint. It will change.
 
@@ -4155,9 +4156,36 @@ async def global_spend_end_users():
 
     if prisma_client is None:
         raise HTTPException(status_code=500, detail={"error": "No db connected"})
-    sql_query = f"""SELECT * FROM "Last30dTopEndUsersSpend";"""
 
-    response = await prisma_client.db.query_raw(query=sql_query)
+    if data is None:
+        sql_query = f"""SELECT * FROM "Last30dTopEndUsersSpend";"""
+
+        response = await prisma_client.db.query_raw(query=sql_query)
+    else:
+        """
+        Gets the top 100 end-users for a given api key
+        """
+        current_date = datetime.now()
+        past_date = current_date - timedelta(days=30)
+        response = await prisma_client.db.litellm_spendlogs.group_by(  # type: ignore
+            by=["end_user"],
+            where={
+                "AND": [{"startTime": {"gte": past_date}}, {"api_key": data.api_key}]  # type: ignore
+            },
+            sum={"spend": True},
+            order={"_sum": {"spend": "desc"}},  # type: ignore
+            take=100,
+            count=True,
+        )
+        if response is not None and isinstance(response, list):
+            new_response = []
+            for r in response:
+                new_r = r
+                new_r["total_spend"] = r["_sum"]["spend"]
+                new_r["total_count"] = r["_count"]["_all"]
+                new_r.pop("_sum")
+                new_r.pop("_count")
+                new_response.append(new_r)
 
     return response
 
@@ -4188,6 +4216,19 @@ async def global_spend_models(
     response = await prisma_client.db.query_raw(query=sql_query)
 
     return response
+
+
+@router.post(
+    "/global/predict/spend/logs",
+    tags=["Budget & Spend Tracking"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def global_predict_spend_logs(request: Request):
+    from litellm.proxy.enterprise.utils import _forecast_daily_cost
+
+    data = await request.json()
+    data = data.get("data")
+    return _forecast_daily_cost(data)
 
 
 @router.get(
@@ -5141,6 +5182,117 @@ async def team_member_add(
             await prisma_client.insert_data(data=user_data, table_name="user")
 
     return team_row
+
+
+@router.post(
+    "/team/member_delete",
+    tags=["team management"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def team_member_delete(
+    data: TeamMemberDeleteRequest,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """ 
+    [BETA]
+
+    delete members (either via user_email or user_id) from a team
+
+    If user doesn't exist, an exception will be raised
+    ```
+    curl -X POST 'http://0.0.0.0:8000/team/update' \
+    
+    -H 'Authorization: Bearer sk-1234' \
+        
+    -H 'Content-Type: application/json' \
+    
+    -D '{
+        "team_id": "45e3e396-ee08-4a61-a88e-16b3ce7e0849",
+        "member": {"role": "user", "user_id": "krrish247652@berri.ai"}
+    }'
+    ```
+    """
+    if prisma_client is None:
+        raise HTTPException(status_code=500, detail={"error": "No db connected"})
+
+    if data.team_id is None:
+        raise HTTPException(status_code=400, detail={"error": "No team id passed in"})
+
+    if data.user_id is None and data.user_email is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "Either user_id or user_email needs to be passed in"},
+        )
+
+    existing_team_row = await prisma_client.get_data(  # type: ignore
+        team_id=data.team_id, table_name="team", query_type="find_unique"
+    )
+
+    ## DELETE MEMBER FROM TEAM
+    new_team_members = []
+    for m in existing_team_row.members_with_roles:
+        if (
+            data.user_id is not None
+            and m["user_id"] is not None
+            and data.user_id == m["user_id"]
+        ):
+            continue
+        elif (
+            data.user_email is not None
+            and m["user_email"] is not None
+            and data.user_email == m["user_email"]
+        ):
+            continue
+        new_team_members.append(m)
+    existing_team_row.members_with_roles = new_team_members
+    complete_team_data = LiteLLM_TeamTable(
+        **existing_team_row.model_dump(),
+    )
+
+    team_row = await prisma_client.update_data(
+        update_key_values=complete_team_data.json(exclude_none=True),
+        data=complete_team_data.json(exclude_none=True),
+        table_name="team",
+        team_id=data.team_id,
+    )
+
+    ## DELETE TEAM ID from USER ROW, IF EXISTS ##
+    # get user row
+    key_val = {}
+    if data.user_id is not None:
+        key_val["user_id"] = data.user_id
+    elif data.user_email is not None:
+        key_val["user_email"] = data.user_email
+    existing_user_rows = await prisma_client.get_data(
+        key_val=key_val,
+        table_name="user",
+        query_type="find_all",
+    )
+    user_data = {  # type: ignore
+        "teams": [],
+        "models": team_row["data"].models,
+    }
+    if existing_user_rows is not None and (
+        isinstance(existing_user_rows, list) and len(existing_user_rows) > 0
+    ):
+        for existing_user in existing_user_rows:
+            team_list = []
+            if hasattr(existing_user, "teams"):
+                team_list = existing_user.teams
+                team_list.remove(data.team_id)
+                user_data["user_id"] = existing_user.user_id
+                await prisma_client.update_data(
+                    user_id=existing_user.user_id,
+                    data=user_data,
+                    update_key_values_custom_query={
+                        "teams": {
+                            "set": [team_row["team_id"]],
+                        }
+                    },
+                    table_name="user",
+                )
+
+    return team_row["data"]
 
 
 @router.post(
