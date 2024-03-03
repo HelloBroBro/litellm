@@ -64,6 +64,7 @@ class ProxyLogging:
         litellm.callbacks.append(self.max_parallel_request_limiter)
         litellm.callbacks.append(self.max_budget_limiter)
         litellm.callbacks.append(self.cache_control_check)
+        litellm.callbacks.append(self.response_taking_too_long_callback)
         for callback in litellm.callbacks:
             if callback not in litellm.input_callback:
                 litellm.input_callback.append(callback)
@@ -142,6 +143,30 @@ class ProxyLogging:
                 raise e
         return data
 
+    async def response_taking_too_long_callback(
+        self,
+        kwargs,  # kwargs to completion
+        completion_response,  # response from completion
+        start_time,
+        end_time,  # start/end time
+    ):
+        if self.alerting is None:
+            return
+        time_difference = end_time - start_time
+        # Convert the timedelta to float (in seconds)
+        time_difference_float = time_difference.total_seconds()
+        litellm_params = kwargs.get("litellm_params", {})
+        api_base = litellm_params.get("api_base", "")
+        model = kwargs.get("model", "")
+        messages = kwargs.get("messages", "")
+        request_info = f"\nRequest Model: `{model}`\nAPI Base: `{api_base}`\nMessages: `{messages}`"
+        slow_message = f"`Responses are slow - {round(time_difference_float,2)}s response time > Alerting threshold: {self.alerting_threshold}s`"
+        if time_difference_float > self.alerting_threshold:
+            await self.alerting_handler(
+                message=slow_message + request_info,
+                level="Low",
+            )
+
     async def response_taking_too_long(
         self,
         start_time: Optional[float] = None,
@@ -189,16 +214,6 @@ class ProxyLogging:
                     level="Medium",
                 )
 
-        elif (
-            type == "slow_response" and start_time is not None and end_time is not None
-        ):
-            slow_message = f"`Responses are slow - {round(end_time-start_time,2)}s response time > Alerting threshold: {self.alerting_threshold}s`"
-            if end_time - start_time > self.alerting_threshold:
-                await self.alerting_handler(
-                    message=slow_message + request_info,
-                    level="Low",
-                )
-
     async def budget_alerts(
         self,
         type: Literal[
@@ -207,6 +222,7 @@ class ProxyLogging:
             "user_and_proxy_budget",
             "failed_budgets",
             "failed_tracking",
+            "projected_limit_exceeded",
         ],
         user_max_budget: float,
         user_current_spend: float,
@@ -235,6 +251,23 @@ class ProxyLogging:
             user_id = str(user_info)
             user_info = f"\nUser ID: {user_id}\n Error {error_message}"
             message = "Failed Tracking Cost for" + user_info
+            await self.alerting_handler(
+                message=message,
+                level="High",
+            )
+            return
+        elif type == "projected_limit_exceeded" and user_info is not None:
+            """
+            Input variables:
+            user_info = {
+                "key_alias": key_alias,
+                "projected_spend": projected_spend,
+                "projected_exceeded_date": projected_exceeded_date,
+            }
+            user_max_budget=soft_limit,
+            user_current_spend=new_spend
+            """
+            message = f"""\n🚨 `ProjectedLimitExceededError` 💸\n\n`Key Alias:` {user_info["key_alias"]} \n`Expected Day of Error`: {user_info["projected_exceeded_date"]} \n`Current Spend`: {user_current_spend} \n`Projected Spend at end of month`: {user_info["projected_spend"]} \n`Soft Limit`: {user_max_budget}"""
             await self.alerting_handler(
                 message=message,
                 level="High",
@@ -733,7 +766,8 @@ class PrismaClient:
                             detail={"error": f"No token passed in. Token={token}"},
                         )
                     response = await self.db.litellm_verificationtoken.find_unique(
-                        where={"token": hashed_token}
+                        where={"token": hashed_token},
+                        include={"litellm_budget_table": True},
                     )
                     if response is not None:
                         # for prisma we need to cast the expires time to str
@@ -743,7 +777,8 @@ class PrismaClient:
                             response.expires = response.expires.isoformat()
                 elif query_type == "find_all" and user_id is not None:
                     response = await self.db.litellm_verificationtoken.find_many(
-                        where={"user_id": user_id}
+                        where={"user_id": user_id},
+                        include={"litellm_budget_table": True},
                     )
                     if response is not None and len(response) > 0:
                         for r in response:
@@ -751,7 +786,8 @@ class PrismaClient:
                                 r.expires = r.expires.isoformat()
                 elif query_type == "find_all" and team_id is not None:
                     response = await self.db.litellm_verificationtoken.find_many(
-                        where={"team_id": team_id}
+                        where={"team_id": team_id},
+                        include={"litellm_budget_table": True},
                     )
                     if response is not None and len(response) > 0:
                         for r in response:
@@ -794,7 +830,9 @@ class PrismaClient:
                                     hashed_tokens.append(t)
                             where_filter["token"]["in"] = hashed_tokens
                     response = await self.db.litellm_verificationtoken.find_many(
-                        order={"spend": "desc"}, where=where_filter  # type: ignore
+                        order={"spend": "desc"},
+                        where=where_filter,  # type: ignore
+                        include={"litellm_budget_table": True},
                     )
                 if response is not None:
                     return response
@@ -1102,7 +1140,13 @@ class PrismaClient:
                     + f"DB Token Table update succeeded {response}"
                     + "\033[0m"
                 )
-                return {"token": token, "data": db_data}
+                _data: dict = {}
+                if response is not None:
+                    try:
+                        _data = response.model_dump()
+                    except:
+                        _data = response.dict()
+                return {"token": token, "data": _data}
             elif (
                 user_id is not None
                 or (table_name is not None and table_name == "user")
@@ -1190,9 +1234,11 @@ class PrismaClient:
                     if t.token.startswith("sk-"):  # type: ignore
                         t.token = self.hash_token(token=t.token)  # type: ignore
                     try:
-                        data_json = self.jsonify_object(data=t.model_dump())
+                        data_json = self.jsonify_object(
+                            data=t.model_dump(exclude_none=True)
+                        )
                     except:
-                        data_json = self.jsonify_object(data=t.dict())
+                        data_json = self.jsonify_object(data=t.dict(exclude_none=True))
                     batcher.litellm_verificationtoken.update(
                         where={"token": t.token},  # type: ignore
                         data={**data_json},  # type: ignore
@@ -1585,6 +1631,7 @@ def get_logging_payload(kwargs, response_obj, start_time, end_time):
         "completion_tokens": usage.get("completion_tokens", 0),
         "request_tags": metadata.get("tags", []),
         "end_user": kwargs.get("user", ""),
+        "api_base": litellm_params.get("api_base", ""),
     }
 
     verbose_proxy_logger.debug(f"SpendTable: created payload - payload: {payload}\n\n")
@@ -1710,6 +1757,69 @@ async def _read_request_body(request):
         return request_data
     except:
         return {}
+
+
+def _is_projected_spend_over_limit(
+    current_spend: float, soft_budget_limit: Optional[float]
+):
+    from datetime import date
+
+    if soft_budget_limit is None:
+        # If there's no limit, we can't exceed it.
+        return False
+
+    today = date.today()
+
+    # Finding the first day of the next month, then subtracting one day to get the end of the current month.
+    if today.month == 12:  # December edge case
+        end_month = date(today.year + 1, 1, 1) - timedelta(days=1)
+    else:
+        end_month = date(today.year, today.month + 1, 1) - timedelta(days=1)
+
+    remaining_days = (end_month - today).days
+
+    # Check for the start of the month to avoid division by zero
+    if today.day == 1:
+        daily_spend_estimate = current_spend
+    else:
+        daily_spend_estimate = current_spend / (today.day - 1)
+
+    # Total projected spend for the month
+    projected_spend = current_spend + (daily_spend_estimate * remaining_days)
+
+    if projected_spend > soft_budget_limit:
+        print_verbose("Projected spend exceeds soft budget limit!")
+        return True
+    return False
+
+
+def _get_projected_spend_over_limit(
+    current_spend: float, soft_budget_limit: Optional[float]
+) -> Optional[tuple]:
+    import datetime
+
+    if soft_budget_limit is None:
+        return None
+
+    today = datetime.date.today()
+    end_month = datetime.date(today.year, today.month + 1, 1) - datetime.timedelta(
+        days=1
+    )
+    remaining_days = (end_month - today).days
+
+    daily_spend = current_spend / (
+        today.day - 1
+    )  # assuming the current spend till today (not including today)
+    projected_spend = daily_spend * remaining_days
+
+    if projected_spend > soft_budget_limit:
+        approx_days = soft_budget_limit / daily_spend
+        limit_exceed_date = today + datetime.timedelta(days=approx_days)
+
+        # return the projected spend and the date it will exceeded
+        return projected_spend, limit_exceed_date
+
+    return None
 
 
 def _is_valid_team_configs(team_id=None, team_config=None, request_data=None):
