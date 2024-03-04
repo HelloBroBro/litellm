@@ -10,7 +10,18 @@ import Image from '@theme/IdealImage';
 
 ### 1. Setup Slack Alerting on your Proxy Config.yaml 
 
-**Update proxy config.yaml with slack alerting**
+**Add Slack Webhook to your env**
+Get a slack webhook url from https://api.slack.com/messaging/webhooks
+
+
+Set `SLACK_WEBHOOK_URL` in your proxy env
+
+```shell
+export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/<>/<>/<>"
+```
+
+**Update proxy config.yaml with slack alerting**  
+
 Add `general_settings:alerting`
 ```yaml
 model_list: 
@@ -22,14 +33,7 @@ general_settings:
     alerting: ["slack"]
 ```
 
-Get a slack webhook url from https://api.slack.com/messaging/webhooks
 
-
-Set `SLACK_WEBHOOK_URL` in your proxy env
-
-```shell
-SLACK_WEBHOOK_URL: "https://hooks.slack.com/services/<>/<>/<>"
-```
 
 Start proxy
 ```bash

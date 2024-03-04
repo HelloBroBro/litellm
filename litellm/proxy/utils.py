@@ -1143,8 +1143,8 @@ class PrismaClient:
                 _data: dict = {}
                 if response is not None:
                     try:
-                        _data = response.model_dump()
-                    except:
+                        _data = response.model_dump()  # type: ignore
+                    except Exception as e:
                         _data = response.dict()
                 return {"token": token, "data": _data}
             elif (
