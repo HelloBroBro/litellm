@@ -200,6 +200,10 @@ def map_finish_reason(
         return "content_filter"
     elif finish_reason == "STOP":  # vertex ai
         return "stop"
+    elif finish_reason == "end_turn" or finish_reason == "stop_sequence":  # anthropic
+        return "stop"
+    elif finish_reason == "max_tokens":  # anthropic
+        return "length"
     return finish_reason
 
 
@@ -2585,7 +2589,7 @@ def client(original_function):
                     if (
                         isinstance(e, openai.APIError)
                         or isinstance(e, openai.Timeout)
-                        or isinstance(openai.APIConnectionError)
+                        or isinstance(e, openai.APIConnectionError)
                     ):
                         print_verbose(f"RETRY TRIGGERED!")
                         kwargs["num_retries"] = num_retries
@@ -4106,6 +4110,7 @@ def get_optional_params(
             and custom_llm_provider != "anyscale"
             and custom_llm_provider != "together_ai"
             and custom_llm_provider != "mistral"
+            and custom_llm_provider != "anthropic"
         ):
             if custom_llm_provider == "ollama" or custom_llm_provider == "ollama_chat":
                 # ollama actually supports json output
@@ -4186,7 +4191,15 @@ def get_optional_params(
     ## raise exception if provider doesn't support passed in param
     if custom_llm_provider == "anthropic":
         ## check if unsupported param passed in
-        supported_params = ["stream", "stop", "temperature", "top_p", "max_tokens"]
+        supported_params = [
+            "stream",
+            "stop",
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "tools",
+            "tool_choice",
+        ]
         _check_valid_arg(supported_params=supported_params)
         # handle anthropic params
         if stream:
@@ -4200,7 +4213,9 @@ def get_optional_params(
         if top_p is not None:
             optional_params["top_p"] = top_p
         if max_tokens is not None:
-            optional_params["max_tokens_to_sample"] = max_tokens
+            optional_params["max_tokens"] = max_tokens
+        if tools is not None:
+            optional_params["tools"] = tools
     elif custom_llm_provider == "cohere":
         ## check if unsupported param passed in
         supported_params = [
@@ -4551,6 +4566,21 @@ def get_optional_params(
                 optional_params["temperature"] = temperature
             if max_tokens is not None:
                 optional_params["max_tokens"] = max_tokens
+        elif "mistral" in model:
+            supported_params = ["max_tokens", "temperature", "stop", "top_p", "stream"]
+            _check_valid_arg(supported_params=supported_params)
+            # mistral params on bedrock
+            # \"max_tokens\":400,\"temperature\":0.7,\"top_p\":0.7,\"stop\":[\"\\\\n\\\\nHuman:\"]}"
+            if max_tokens is not None:
+                optional_params["max_tokens"] = max_tokens
+            if temperature is not None:
+                optional_params["temperature"] = temperature
+            if top_p is not None:
+                optional_params["top_p"] = top_p
+            if stop is not None:
+                optional_params["stop"] = stop
+            if stream is not None:
+                optional_params["stream"] = stream
     elif custom_llm_provider == "aleph_alpha":
         supported_params = [
             "max_tokens",
@@ -8017,10 +8047,21 @@ class CustomStreamWrapper:
         finish_reason = None
         if str_line.startswith("data:"):
             data_json = json.loads(str_line[5:])
-            text = data_json.get("completion", "")
-            if data_json.get("stop_reason", None):
+            type_chunk = data_json.get("type", None)
+            if type_chunk == "content_block_delta":
+                """
+                Anthropic content chunk
+                chunk = {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': 'Hello'}}
+                """
+                text = data_json.get("delta", {}).get("text", "")
+            elif type_chunk == "message_delta":
+                """
+                Anthropic
+                chunk = {'type': 'message_delta', 'delta': {'stop_reason': 'max_tokens', 'stop_sequence': None}, 'usage': {'output_tokens': 10}}
+                """
+                # TODO - get usage from this chunk, set in response
+                finish_reason = data_json.get("delta", {}).get("stop_reason", None)
                 is_finished = True
-                finish_reason = data_json["stop_reason"]
             return {
                 "text": text,
                 "is_finished": is_finished,
@@ -8091,7 +8132,8 @@ class CustomStreamWrapper:
                     text = ""  # don't return the final bos token
                     is_finished = True
                     finish_reason = "stop"
-
+                elif data_json.get("error", False):
+                    raise Exception(data_json.get("error"))
                 return {
                     "text": text,
                     "is_finished": is_finished,
@@ -8106,7 +8148,7 @@ class CustomStreamWrapper:
             }
         except Exception as e:
             traceback.print_exc()
-            # raise(e)
+            raise e
 
     def handle_ai21_chunk(self, chunk):  # fake streaming
         chunk = chunk.decode("utf-8")

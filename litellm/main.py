@@ -12,7 +12,6 @@ from typing import Any, Literal, Union
 from functools import partial
 import dotenv, traceback, random, asyncio, time, contextvars
 from copy import deepcopy
-
 import httpx
 import litellm
 from ._logging import verbose_logger
@@ -1023,7 +1022,7 @@ def completion(
                 api_base
                 or litellm.api_base
                 or get_secret("ANTHROPIC_API_BASE")
-                or "https://api.anthropic.com/v1/complete"
+                or "https://api.anthropic.com/v1/messages"
             )
             custom_prompt_dict = custom_prompt_dict or litellm.custom_prompt_dict
             response = anthropic.completion(
