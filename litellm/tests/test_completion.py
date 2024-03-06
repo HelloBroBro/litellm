@@ -56,7 +56,7 @@ def test_completion_custom_provider_model_name():
 def test_completion_claude():
     litellm.set_verbose = True
     litellm.cache = None
-    litellm.AnthropicConfig(max_tokens=200, metadata={"user_id": "1224"})
+    litellm.AnthropicTextConfig(max_tokens_to_sample=200, metadata={"user_id": "1224"})
     messages = [
         {
             "role": "system",
@@ -67,9 +67,7 @@ def test_completion_claude():
     try:
         # test without max tokens
         response = completion(
-            model="claude-instant-1.2",
-            messages=messages,
-            request_timeout=10,
+            model="claude-instant-1", messages=messages, request_timeout=10
         )
         # Add any assertions, here to check response args
         print(response)
@@ -82,6 +80,23 @@ def test_completion_claude():
 
 
 # test_completion_claude()
+
+
+def test_completion_claude_3_empty_response():
+    messages = [
+        {
+            "role": "system",
+            "content": "You are 2twNLGfqk4GMOn3ffp4p.",
+        },
+        {"role": "user", "content": "Hi gm!"},
+        {"role": "assistant", "content": "Good morning! How are you doing today?"},
+        {
+            "role": "user",
+            "content": "I was hoping we could chat a bit",
+        },
+    ]
+    response = litellm.completion(model="claude-3-opus-20240229", messages=messages)
+    print(response)
 
 
 def test_completion_claude_3():
@@ -136,6 +151,8 @@ def test_completion_claude_3_function_call():
         assert isinstance(
             response.choices[0].message.tool_calls[0].function.arguments, str
         )
+    except litellm.ServiceUnavailableError as e:
+        pass
     except Exception as e:
         pytest.fail(f"Error occurred: {e}")
 
@@ -1389,9 +1406,9 @@ def test_completion_replicate_vicuna():
 
 def test_replicate_custom_prompt_dict():
     litellm.set_verbose = True
-    model_name = "replicate/meta/llama-2-7b-chat:13c3cdee13ee059ab779f0291d29054dab00a47dad8261375654de5540165fb0"
+    model_name = "replicate/mistralai/mixtral-8x7b-instruct-v0.1"
     litellm.register_prompt_template(
-        model="replicate/meta/llama-2-7b-chat:13c3cdee13ee059ab779f0291d29054dab00a47dad8261375654de5540165fb0",
+        model="replicate/mistralai/mixtral-8x7b-instruct-v0.1",
         initial_prompt_value="You are a good assistant",  # [OPTIONAL]
         roles={
             "system": {
@@ -1648,7 +1665,6 @@ def test_completion_chat_sagemaker_mistral():
 # test_completion_chat_sagemaker_mistral()
 
 
-@pytest.mark.skip(reason="AWS Suspended Account")
 def test_completion_bedrock_titan_null_response():
     try:
         response = completion(
@@ -1674,7 +1690,6 @@ def test_completion_bedrock_titan_null_response():
         pytest.fail(f"An error occurred - {str(e)}")
 
 
-@pytest.mark.skip(reason="AWS Suspended Account")
 def test_completion_bedrock_titan():
     try:
         response = completion(
@@ -1696,7 +1711,6 @@ def test_completion_bedrock_titan():
 # test_completion_bedrock_titan()
 
 
-@pytest.mark.skip(reason="AWS Suspended Account")
 def test_completion_bedrock_claude():
     print("calling claude")
     try:
@@ -1718,7 +1732,6 @@ def test_completion_bedrock_claude():
 # test_completion_bedrock_claude()
 
 
-@pytest.mark.skip(reason="AWS Suspended Account")
 def test_completion_bedrock_cohere():
     print("calling bedrock cohere")
     litellm.set_verbose = True

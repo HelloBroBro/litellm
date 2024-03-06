@@ -2,7 +2,7 @@ from enum import Enum
 import requests, traceback
 import json, re, xml.etree.ElementTree as ET
 from jinja2 import Template, exceptions, Environment, meta
-from typing import Optional, Any
+from typing import Optional, Any, List
 import imghdr, base64
 
 
@@ -575,6 +575,7 @@ def anthropic_messages_pt(messages: list):
         if messages[i]["role"] == "assistant":
             last_assistant_message_idx = i
 
+    new_messages.append(messages[-1])
     if last_assistant_message_idx is not None:
         new_messages[last_assistant_message_idx]["content"] = new_messages[
             last_assistant_message_idx
@@ -585,7 +586,7 @@ def anthropic_messages_pt(messages: list):
     return new_messages
 
 
-def extract_between_tags(tag: str, string: str, strip: bool = False) -> list[str]:
+def extract_between_tags(tag: str, string: str, strip: bool = False) -> List[str]:
     ext_list = re.findall(f"<{tag}>(.+?)</{tag}>", string, re.DOTALL)
     if strip:
         ext_list = [e.strip() for e in ext_list]
