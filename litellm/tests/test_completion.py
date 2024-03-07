@@ -151,8 +151,6 @@ def test_completion_claude_3_function_call():
         assert isinstance(
             response.choices[0].message.tool_calls[0].function.arguments, str
         )
-    except litellm.ServiceUnavailableError as e:
-        pass
     except Exception as e:
         pytest.fail(f"Error occurred: {e}")
 
@@ -219,6 +217,56 @@ def test_completion_claude_3_base64():
             pass
         else:
             pytest.fail(f"An exception occurred - {str(e)}")
+
+
+@pytest.mark.skip(reason="issue getting wikipedia images in ci/cd")
+def test_completion_claude_3_function_plus_image():
+    litellm.set_verbose = True
+
+    image_content = [
+        {"type": "text", "text": "What’s in this image?"},
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+            },
+        },
+    ]
+    image_message = {"role": "user", "content": image_content}
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_current_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "text",
+                            "description": "The city and state, e.g. San Francisco, CA",
+                        },
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+                    },
+                    "required": ["location"],
+                },
+            },
+        }
+    ]
+
+    tool_choice = {"type": "function", "function": {"name": "get_current_weather"}}
+    messages = [{"role": "user", "content": "What's the weather like in Boston today?"}]
+
+    response = completion(
+        model="claude-3-sonnet-20240229",
+        messages=[image_message],
+        tool_choice=tool_choice,
+        tools=tools,
+        stream=False,
+    )
+
+    print(response)
 
 
 def test_completion_mistral_api():
@@ -1406,9 +1454,9 @@ def test_completion_replicate_vicuna():
 
 def test_replicate_custom_prompt_dict():
     litellm.set_verbose = True
-    model_name = "replicate/mistralai/mixtral-8x7b-instruct-v0.1"
+    model_name = "replicate/meta/llama-2-7b-chat"
     litellm.register_prompt_template(
-        model="replicate/mistralai/mixtral-8x7b-instruct-v0.1",
+        model="replicate/meta/llama-2-7b-chat",
         initial_prompt_value="You are a good assistant",  # [OPTIONAL]
         roles={
             "system": {
@@ -1442,7 +1490,7 @@ def test_replicate_custom_prompt_dict():
 
 # test_replicate_custom_prompt_dict()
 
-# commenthing this out since we won't be always testing a custom replicate deployment
+# commenthing this out since we won't be always testing a custom, replicate deployment
 # def test_completion_replicate_deployments():
 #     print("TESTING REPLICATE")
 #     litellm.set_verbose=False
@@ -2141,6 +2189,8 @@ async def test_acompletion_gemini():
         response = await litellm.acompletion(model=model_name, messages=messages)
         # Add any assertions here to check the response
         print(f"response: {response}")
+    except litellm.Timeout as e:
+        pass
     except litellm.APIError as e:
         pass
     except Exception as e:

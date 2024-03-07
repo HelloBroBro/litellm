@@ -1127,7 +1127,7 @@ class Logging:
             self.model_call_details["cache_hit"] = cache_hit
             ## if model in model cost map - log the response cost
             ## else set cost to None
-            verbose_logger.debug(f"Model={self.model}; result={result}")
+            verbose_logger.debug(f"Model={self.model};")
             if (
                 result is not None
                 and (
@@ -4006,6 +4006,7 @@ def get_optional_params_embeddings(
         for k, v in passed_params.items()
         if (k in default_params and v != default_params[k])
     }
+
     ## raise exception if non-default value passed for non-openai/azure embedding calls
     if custom_llm_provider == "openai":
         # 'dimensions` is only supported in `text-embedding-3` and later models
@@ -4018,6 +4019,18 @@ def get_optional_params_embeddings(
             raise UnsupportedParamsError(
                 status_code=500,
                 message=f"Setting dimensions is not supported for OpenAI `text-embedding-3` and later models. To drop it from the call, set `litellm.drop_params = True`.",
+            )
+    if custom_llm_provider == "vertex_ai":
+        if len(non_default_params.keys()) > 0:
+            if litellm.drop_params is True:  # drop the unsupported non-default values
+                keys = list(non_default_params.keys())
+                for k in keys:
+                    non_default_params.pop(k, None)
+                final_params = {**non_default_params, **kwargs}
+                return final_params
+            raise UnsupportedParamsError(
+                status_code=500,
+                message=f"Setting user/encoding format is not supported by {custom_llm_provider}. To drop it from the call, set `litellm.drop_params = True`.",
             )
 
     if (
@@ -6655,10 +6668,11 @@ def exception_type(
                         method="POST", url="https://api.openai.com/v1"
                     )
                     raise APIError(
+                        status_code=500,
                         message=f"{exception_provider} - {message}",
                         llm_provider=custom_llm_provider,
                         model=model,
-                        response=httpx.Response(status_code=500, request=_request),
+                        request=_request,
                     )
                 elif hasattr(original_exception, "status_code"):
                     exception_mapping_worked = True
@@ -7104,7 +7118,10 @@ def exception_type(
                         llm_provider="palm",
                         response=original_exception.response,
                     )
-                if "504 Deadline expired before operation could complete." in error_str:
+                if (
+                    "504 Deadline expired before operation could complete." in error_str
+                    or "504 Deadline Exceeded" in error_str
+                ):
                     exception_mapping_worked = True
                     raise Timeout(
                         message=f"PalmException - {original_exception.message}",
