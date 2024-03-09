@@ -68,6 +68,72 @@ CMD ["--port", "4000", "--config", "config.yaml", "--detailed_debug", "--run_gun
 
 </TabItem>
 
+<TabItem value="kubernetes" label="Kubernetes">
+
+Deploying a config file based litellm instance just requires a simple deployment that loads
+the config.yaml file via a config map. Also it would be a good practice to use the env var
+declaration for api keys, and attach the env vars with the api key values as an opaque secret.
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config-file
+data:
+  config.yaml: |
+      model_list: 
+        - model_name: gpt-3.5-turbo
+          litellm_params:
+            model: azure/gpt-turbo-small-ca
+            api_base: https://my-endpoint-canada-berri992.openai.azure.com/
+            api_key: os.environ/CA_AZURE_OPENAI_API_KEY
+---
+apiVersion: v1
+kind: Secret
+type: Opaque
+metadata:
+  name: litellm-secrets
+data:
+  CA_AZURE_OPENAI_API_KEY: bWVvd19pbV9hX2NhdA== # your api key in base64
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-deployment
+  labels:
+    app: litellm
+spec:
+  selector:
+    matchLabels:
+      app: litellm
+  template:
+    metadata:
+      labels:
+        app: litellm
+    spec:
+      containers:
+      - name: litellm
+        image: ghcr.io/berriai/litellm:main-latest # it is recommended to fix a version generally
+        ports:
+        - containerPort: 4000
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/proxy_server_config.yaml
+          subPath: config.yaml
+        envFrom:
+        - secretRef:
+            name: litellm-secrets
+      volumes:
+        - name: config-volume
+          configMap:
+            name: litellm-config-file
+```
+
+</TabItem>
+
+> [!TIP]
+> To avoid issues with predictability, difficulties in rollback, and inconsistent environments, use versioning or SHA digests (for example, `litellm:main-v1.30.3` or `litellm@sha256:12345abcdef...`) instead of `litellm:main-latest`.
+
 </Tabs>
 
 ## Deploy with Database
@@ -218,8 +284,49 @@ Provide an ssl certificate when starting litellm proxy server
 
 ## Platform-specific Guide
 
-
 <Tabs>
+
+<TabItem value="aws-stack" label="AWS Cloud Formation Stack">
+
+### AWS Cloud Formation Stack
+LiteLLM AWS Cloudformation Stack - **Get the best LiteLLM AutoScaling Policy and Provision the DB for LiteLLM Proxy**
+
+This will provision:
+- LiteLLMServer - EC2 Instance
+- LiteLLMServerAutoScalingGroup
+- LiteLLMServerScalingPolicy (autoscaling policy)
+- LiteLLMDB - RDS::DBInstance
+
+#### Using AWS Cloud Formation Stack
+**LiteLLM Cloudformation stack is located [here - litellm.yaml](https://github.com/BerriAI/litellm/blob/main/enterprise/cloudformation_stack/litellm.yaml)**
+
+#### 1. Create the CloudFormation Stack:
+In the AWS Management Console, navigate to the CloudFormation service, and click on "Create Stack."
+
+On the "Create Stack" page, select "Upload a template file" and choose the litellm.yaml file 
+
+Now monitor the stack was created successfully. 
+
+#### 2. Get the Database URL:
+Once the stack is created, get the DatabaseURL of the Database resource, copy this value 
+
+#### 3. Connect to the EC2 Instance and deploy litellm on the EC2 container
+From the EC2 console, connect to the instance created by the stack (e.g., using SSH).
+
+Run the following command, replacing <database_url> with the value you copied in step 2
+
+```shell
+docker run --name litellm-proxy \
+   -e DATABASE_URL=<database_url> \
+   -p 4000:4000 \
+   ghcr.io/berriai/litellm-database:main-latest
+```
+
+#### 4. Access the Application:
+
+Once the container is running, you can access the application by going to `http://<ec2-public-ip>:4000` in your browser.
+
+</TabItem>
 <TabItem value="google-cloud-run" label="Google Cloud Run">
 
 ### Deploy on Google Cloud Run
@@ -309,17 +416,3 @@ Run the command `docker-compose up` or `docker compose up` as per your docker in
 
 
 Your LiteLLM container should be running now on the defined port e.g. `8000`.
-
-
-
-## LiteLLM Proxy Performance
-
-LiteLLM proxy has been load tested to handle 1500 req/s.
-
-### Throughput - 30% Increase
-LiteLLM proxy + Load Balancer gives **30% increase** in throughput compared to Raw OpenAI API
-<Image img={require('../../img/throughput.png')} />
-
-### Latency Added - 0.00325 seconds
-LiteLLM proxy adds **0.00325 seconds** latency as compared to using the Raw OpenAI API
-<Image img={require('../../img/latency.png')} />
