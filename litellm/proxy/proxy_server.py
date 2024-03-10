@@ -9,6 +9,9 @@ import warnings
 import importlib
 import warnings
 import backoff
+from argon2 import PasswordHasher
+
+ph = PasswordHasher()
 
 
 def showwarning(message, category, filename, lineno, file=None, line=None):
@@ -120,6 +123,8 @@ from fastapi import (
     Header,
     Response,
     Form,
+    UploadFile,
+    File,
 )
 from fastapi.routing import APIRouter
 from fastapi.security import OAuth2PasswordBearer
@@ -255,6 +260,7 @@ litellm_proxy_admin_name = "default_user_id"
 ui_access_mode: Literal["admin", "all"] = "all"
 proxy_budget_rescheduler_min_time = 597
 proxy_budget_rescheduler_max_time = 605
+litellm_master_key_hash = None
 ### INITIALIZE GLOBAL LOGGING OBJECT ###
 proxy_logging_obj = ProxyLogging(user_api_key_cache=user_api_key_cache)
 ### REDIS QUEUE ###
@@ -334,11 +340,13 @@ async def user_api_key_auth(
             Unprotected endpoints
             """
             return UserAPIKeyAuth()
+        elif route.startswith("/config/"):
+            raise Exception(f"Only admin can modify config")
 
         if api_key is None:  # only require api key if master key is set
             raise Exception(f"No api key passed in.")
 
-        if secrets.compare_digest(api_key, ""):
+        if api_key == "":
             # missing 'Bearer ' prefix
             raise Exception(
                 f"Malformed API Key passed in. Ensure Key has `Bearer ` prefix. Passed in: {passed_in_key}"
@@ -346,19 +354,22 @@ async def user_api_key_auth(
 
         ### CHECK IF ADMIN ###
         # note: never string compare api keys, this is vulenerable to a time attack. Use secrets.compare_digest instead
-        is_master_key_valid = secrets.compare_digest(api_key, master_key)
+        try:
+            is_master_key_valid = ph.verify(litellm_master_key_hash, api_key)
+        except Exception as e:
+            is_master_key_valid = False
+
         if is_master_key_valid:
             return UserAPIKeyAuth(
                 api_key=master_key,
                 user_role="proxy_admin",
                 user_id=litellm_proxy_admin_name,
             )
+
         if isinstance(
             api_key, str
         ):  # if generated token, make sure it starts with sk-.
             assert api_key.startswith("sk-")  # prevent token hashes from being used
-        if route.startswith("/config/") and not is_master_key_valid:
-            raise Exception(f"Only admin can modify config")
 
         if (
             prisma_client is None and custom_db_client is None
@@ -1492,7 +1503,7 @@ class ProxyConfig:
         """
         Load config values into proxy global state
         """
-        global master_key, user_config_file_path, otel_logging, user_custom_auth, user_custom_auth_path, user_custom_key_generate, use_background_health_checks, health_check_interval, use_queue, custom_db_client, proxy_budget_rescheduler_max_time, proxy_budget_rescheduler_min_time, ui_access_mode
+        global master_key, user_config_file_path, otel_logging, user_custom_auth, user_custom_auth_path, user_custom_key_generate, use_background_health_checks, health_check_interval, use_queue, custom_db_client, proxy_budget_rescheduler_max_time, proxy_budget_rescheduler_min_time, ui_access_mode, litellm_master_key_hash
 
         # Load existing config
         config = await self.get_config(config_file_path=config_file_path)
@@ -1675,9 +1686,9 @@ class ProxyConfig:
                         # these are litellm callbacks - "langfuse", "sentry", "wandb"
                         else:
                             litellm.success_callback.append(callback)
-                    verbose_proxy_logger.debug(
+                    print(  # noqa
                         f"{blue_color_code} Initialized Success Callbacks - {litellm.success_callback} {reset_color_code}"
-                    )
+                    )  # noqa
                 elif key == "failure_callback":
                     litellm.failure_callback = []
 
@@ -1757,6 +1768,9 @@ class ProxyConfig:
             )
             if master_key and master_key.startswith("os.environ/"):
                 master_key = litellm.get_secret(master_key)
+
+            if master_key is not None and isinstance(master_key, str):
+                litellm_master_key_hash = ph.hash(master_key)
             ### CUSTOM API KEY AUTH ###
             ## pass filepath
             custom_auth = general_settings.get("custom_auth", None)
@@ -2835,6 +2849,7 @@ async def chat_completion(
         response = await proxy_logging_obj.post_call_success_hook(
             user_api_key_dict=user_api_key_dict, response=response
         )
+
         return response
     except Exception as e:
         traceback.print_exc()
@@ -3071,13 +3086,13 @@ async def embeddings(
     "/v1/images/generations",
     dependencies=[Depends(user_api_key_auth)],
     response_class=ORJSONResponse,
-    tags=["image generation"],
+    tags=["images"],
 )
 @router.post(
     "/images/generations",
     dependencies=[Depends(user_api_key_auth)],
     response_class=ORJSONResponse,
-    tags=["image generation"],
+    tags=["images"],
 )
 async def image_generation(
     request: Request,
@@ -3203,6 +3218,169 @@ async def image_generation(
         if isinstance(e, HTTPException):
             raise ProxyException(
                 message=getattr(e, "message", str(e)),
+                type=getattr(e, "type", "None"),
+                param=getattr(e, "param", "None"),
+                code=getattr(e, "status_code", status.HTTP_400_BAD_REQUEST),
+            )
+        else:
+            error_traceback = traceback.format_exc()
+            error_msg = f"{str(e)}\n\n{error_traceback}"
+            raise ProxyException(
+                message=getattr(e, "message", error_msg),
+                type=getattr(e, "type", "None"),
+                param=getattr(e, "param", "None"),
+                code=getattr(e, "status_code", 500),
+            )
+
+
+@router.post(
+    "/v1/audio/transcriptions",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["audio"],
+)
+@router.post(
+    "/audio/transcriptions",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["audio"],
+)
+async def audio_transcriptions(
+    request: Request,
+    file: UploadFile = File(...),
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """
+    Same params as:
+
+    https://platform.openai.com/docs/api-reference/audio/createTranscription?lang=curl
+    """
+    global proxy_logging_obj
+    try:
+        # Use orjson to parse JSON data, orjson speeds up requests significantly
+        form_data = await request.form()
+        data: Dict = {key: value for key, value in form_data.items() if key != "file"}
+
+        # Include original request and headers in the data
+        data["proxy_server_request"] = {  # type: ignore
+            "url": str(request.url),
+            "method": request.method,
+            "headers": dict(request.headers),
+            "body": copy.copy(data),  # use copy instead of deepcopy
+        }
+
+        if data.get("user", None) is None and user_api_key_dict.user_id is not None:
+            data["user"] = user_api_key_dict.user_id
+
+        data["model"] = (
+            general_settings.get("moderation_model", None)  # server default
+            or user_model  # model name passed via cli args
+            or data["model"]  # default passed in http request
+        )
+        if user_model:
+            data["model"] = user_model
+
+        if "metadata" not in data:
+            data["metadata"] = {}
+        data["metadata"]["user_api_key"] = user_api_key_dict.api_key
+        data["metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
+        _headers = dict(request.headers)
+        _headers.pop(
+            "authorization", None
+        )  # do not store the original `sk-..` api key in the db
+        data["metadata"]["headers"] = _headers
+        data["metadata"]["user_api_key_alias"] = getattr(
+            user_api_key_dict, "key_alias", None
+        )
+        data["metadata"]["user_api_key_user_id"] = user_api_key_dict.user_id
+        data["metadata"]["user_api_key_team_id"] = getattr(
+            user_api_key_dict, "team_id", None
+        )
+        data["metadata"]["endpoint"] = str(request.url)
+        data["metadata"]["file_name"] = file.filename
+
+        ### TEAM-SPECIFIC PARAMS ###
+        if user_api_key_dict.team_id is not None:
+            team_config = await proxy_config.load_team_config(
+                team_id=user_api_key_dict.team_id
+            )
+            if len(team_config) == 0:
+                pass
+            else:
+                team_id = team_config.pop("team_id", None)
+                data["metadata"]["team_id"] = team_id
+                data = {
+                    **team_config,
+                    **data,
+                }  # add the team-specific configs to the completion call
+
+        router_model_names = (
+            [m["model_name"] for m in llm_model_list]
+            if llm_model_list is not None
+            else []
+        )
+
+        assert (
+            file.filename is not None
+        )  # make sure filename passed in (needed for type)
+
+        with open(file.filename, "wb+") as f:
+            f.write(await file.read())
+            try:
+                data["file"] = open(file.filename, "rb")
+                ### CALL HOOKS ### - modify incoming data / reject request before calling the model
+                data = await proxy_logging_obj.pre_call_hook(
+                    user_api_key_dict=user_api_key_dict,
+                    data=data,
+                    call_type="audio_transcription",
+                )
+
+                ## ROUTE TO CORRECT ENDPOINT ##
+                # skip router if user passed their key
+                if "api_key" in data:
+                    response = await litellm.atranscription(**data)
+                elif (
+                    llm_router is not None and data["model"] in router_model_names
+                ):  # model in router model list
+                    response = await llm_router.atranscription(**data)
+
+                elif (
+                    llm_router is not None
+                    and data["model"] in llm_router.deployment_names
+                ):  # model in router deployments, calling a specific deployment on the router
+                    response = await llm_router.atranscription(
+                        **data, specific_deployment=True
+                    )
+                elif (
+                    llm_router is not None
+                    and llm_router.model_group_alias is not None
+                    and data["model"] in llm_router.model_group_alias
+                ):  # model set in model_group_alias
+                    response = await llm_router.atranscription(
+                        **data
+                    )  # ensure this goes the llm_router, router will do the correct alias mapping
+                elif user_model is not None:  # `litellm --model <your-model-name>`
+                    response = await litellm.atranscription(**data)
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={"error": "Invalid model name passed in"},
+                    )
+
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+            finally:
+                os.remove(file.filename)  # Delete the saved file
+
+        ### ALERTING ###
+        data["litellm_status"] = "success"  # used for alerting
+        return response
+    except Exception as e:
+        await proxy_logging_obj.post_call_failure_hook(
+            user_api_key_dict=user_api_key_dict, original_exception=e
+        )
+        traceback.print_exc()
+        if isinstance(e, HTTPException):
+            raise ProxyException(
+                message=getattr(e, "message", str(e.detail)),
                 type=getattr(e, "type", "None"),
                 param=getattr(e, "param", "None"),
                 code=getattr(e, "status_code", status.HTTP_400_BAD_REQUEST),
@@ -6868,42 +7046,45 @@ async def health_endpoint(
     else, the health checks will be run on models when /health is called.
     """
     global health_check_results, use_background_health_checks, user_model
-
-    if llm_model_list is None:
-        # if no router set, check if user set a model using litellm --model ollama/llama2
-        if user_model is not None:
-            healthy_endpoints, unhealthy_endpoints = await perform_health_check(
-                model_list=[], cli_model=user_model
+    try:
+        if llm_model_list is None:
+            # if no router set, check if user set a model using litellm --model ollama/llama2
+            if user_model is not None:
+                healthy_endpoints, unhealthy_endpoints = await perform_health_check(
+                    model_list=[], cli_model=user_model
+                )
+                return {
+                    "healthy_endpoints": healthy_endpoints,
+                    "unhealthy_endpoints": unhealthy_endpoints,
+                    "healthy_count": len(healthy_endpoints),
+                    "unhealthy_count": len(unhealthy_endpoints),
+                }
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": "Model list not initialized"},
             )
+
+        ### FILTER MODELS FOR ONLY THOSE USER HAS ACCESS TO ###
+        if len(user_api_key_dict.models) > 0:
+            allowed_model_names = user_api_key_dict.models
+        else:
+            allowed_model_names = []  #
+        if use_background_health_checks:
+            return health_check_results
+        else:
+            healthy_endpoints, unhealthy_endpoints = await perform_health_check(
+                llm_model_list, model
+            )
+
             return {
                 "healthy_endpoints": healthy_endpoints,
                 "unhealthy_endpoints": unhealthy_endpoints,
                 "healthy_count": len(healthy_endpoints),
                 "unhealthy_count": len(unhealthy_endpoints),
             }
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": "Model list not initialized"},
-        )
-
-    ### FILTER MODELS FOR ONLY THOSE USER HAS ACCESS TO ###
-    if len(user_api_key_dict.models) > 0:
-        allowed_model_names = user_api_key_dict.models
-    else:
-        allowed_model_names = []  #
-    if use_background_health_checks:
-        return health_check_results
-    else:
-        healthy_endpoints, unhealthy_endpoints = await perform_health_check(
-            llm_model_list, model
-        )
-
-        return {
-            "healthy_endpoints": healthy_endpoints,
-            "unhealthy_endpoints": unhealthy_endpoints,
-            "healthy_count": len(healthy_endpoints),
-            "unhealthy_count": len(unhealthy_endpoints),
-        }
+    except Exception as e:
+        traceback.print_exc()
+        raise e
 
 
 @router.get(

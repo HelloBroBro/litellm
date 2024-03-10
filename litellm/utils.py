@@ -10,7 +10,6 @@
 import sys, re, binascii, struct
 import litellm
 import dotenv, json, traceback, threading, base64, ast
-
 import subprocess, os
 from os.path import abspath, join, dirname
 import litellm, openai
@@ -98,7 +97,7 @@ try:
 except Exception as e:
     verbose_logger.debug(f"Exception import enterprise features {str(e)}")
 
-from typing import cast, List, Dict, Union, Optional, Literal, Any
+from typing import cast, List, Dict, Union, Optional, Literal, Any, BinaryIO
 from .caching import Cache
 from concurrent.futures import ThreadPoolExecutor
 
@@ -790,6 +789,38 @@ class ImageResponse(OpenAIObject):
             return self.dict()
 
 
+class TranscriptionResponse(OpenAIObject):
+    text: Optional[str] = None
+
+    _hidden_params: dict = {}
+
+    def __init__(self, text=None):
+        super().__init__(text=text)
+
+    def __contains__(self, key):
+        # Define custom behavior for the 'in' operator
+        return hasattr(self, key)
+
+    def get(self, key, default=None):
+        # Custom .get() method to access attributes with a default value if the attribute doesn't exist
+        return getattr(self, key, default)
+
+    def __getitem__(self, key):
+        # Allow dictionary-style access to attributes
+        return getattr(self, key)
+
+    def __setitem__(self, key, value):
+        # Allow dictionary-style assignment of attributes
+        setattr(self, key, value)
+
+    def json(self, **kwargs):
+        try:
+            return self.model_dump()  # noqa
+        except:
+            # if using pydantic v1
+            return self.dict()
+
+
 ############################################################
 def print_verbose(print_statement, logger_only: bool = False):
     try:
@@ -815,6 +846,8 @@ class CallTypes(Enum):
     aimage_generation = "aimage_generation"
     moderation = "moderation"
     amoderation = "amoderation"
+    atranscription = "atranscription"
+    transcription = "transcription"
 
 
 # Logging function -> log the exact model details + what's being sent | Non-BlockingP
@@ -948,6 +981,7 @@ class Logging:
                 curl_command = self.model_call_details
 
             # only print verbose if verbose logger is not set
+
             if verbose_logger.level == 0:
                 # this means verbose logger was not switched on - user is in litellm.set_verbose=True
                 print_verbose(f"\033[92m{curl_command}\033[0m\n")
@@ -1134,6 +1168,7 @@ class Logging:
                     isinstance(result, ModelResponse)
                     or isinstance(result, EmbeddingResponse)
                     or isinstance(result, ImageResponse)
+                    or isinstance(result, TranscriptionResponse)
                 )
                 and self.stream != True
             ):  # handle streaming separately
@@ -1169,9 +1204,6 @@ class Logging:
                                     model=base_model,
                                 )
                             )
-                    verbose_logger.debug(
-                        f"Model={self.model}; cost={self.model_call_details['response_cost']}"
-                    )
                 except litellm.NotFoundError as e:
                     verbose_logger.debug(
                         f"Model={self.model} not found in completion cost map."
@@ -1202,7 +1234,7 @@ class Logging:
     def success_handler(
         self, result=None, start_time=None, end_time=None, cache_hit=None, **kwargs
     ):
-        verbose_logger.debug(f"Logging Details LiteLLM-Success Call: {cache_hit}")
+        print_verbose(f"Logging Details LiteLLM-Success Call: {cache_hit}")
         start_time, end_time, result = self._success_handler_helper_fn(
             start_time=start_time,
             end_time=end_time,
@@ -1211,7 +1243,7 @@ class Logging:
         )
         # print(f"original response in success handler: {self.model_call_details['original_response']}")
         try:
-            verbose_logger.debug(f"success callbacks: {litellm.success_callback}")
+            print_verbose(f"success callbacks: {litellm.success_callback}")
             ## BUILD COMPLETE STREAMED RESPONSE
             complete_streaming_response = None
             if self.stream and isinstance(result, ModelResponse):
@@ -1234,7 +1266,7 @@ class Logging:
                     self.sync_streaming_chunks.append(result)
 
             if complete_streaming_response is not None:
-                verbose_logger.debug(
+                print_verbose(
                     f"Logging Details LiteLLM-Success Call streaming complete"
                 )
                 self.model_call_details["complete_streaming_response"] = (
@@ -1279,6 +1311,15 @@ class Logging:
 
             for callback in callbacks:
                 try:
+                    litellm_params = self.model_call_details.get("litellm_params", {})
+                    if litellm_params.get("no-log", False) == True:
+                        # proxy cost tracking cal backs should run
+                        if not (
+                            isinstance(callback, CustomLogger)
+                            and "_PROXY_" in callback.__class__.__name__
+                        ):
+                            print_verbose("no-log request, skipping logging")
+                            continue
                     if callback == "lite_debugger":
                         print_verbose("reaches lite_debugger for logging!")
                         print_verbose(f"liteDebuggerClient: {liteDebuggerClient}")
@@ -1572,6 +1613,14 @@ class Logging:
                             "aembedding", False
                         )
                         == False
+                        and self.model_call_details.get("litellm_params", {}).get(
+                            "aimage_generation", False
+                        )
+                        == False
+                        and self.model_call_details.get("litellm_params", {}).get(
+                            "atranscription", False
+                        )
+                        == False
                     ):  # custom logger class
                         if self.stream and complete_streaming_response is None:
                             callback.log_stream_event(
@@ -1602,6 +1651,14 @@ class Logging:
                         == False
                         and self.model_call_details.get("litellm_params", {}).get(
                             "aembedding", False
+                        )
+                        == False
+                        and self.model_call_details.get("litellm_params", {}).get(
+                            "aimage_generation", False
+                        )
+                        == False
+                        and self.model_call_details.get("litellm_params", {}).get(
+                            "atranscription", False
                         )
                         == False
                     ):  # custom logger functions
@@ -1638,6 +1695,7 @@ class Logging:
         """
         Implementing async callbacks, to handle asyncio event loop issues when custom integrations need to use async functions.
         """
+        print_verbose(f"Logging Details LiteLLM-Async Success Call: {cache_hit}")
         start_time, end_time, result = self._success_handler_helper_fn(
             start_time=start_time, end_time=end_time, result=result, cache_hit=cache_hit
         )
@@ -1707,7 +1765,20 @@ class Logging:
             callbacks = litellm._async_success_callback
         verbose_logger.debug(f"Async success callbacks: {callbacks}")
         for callback in callbacks:
+            # check if callback can run for this request
+            litellm_params = self.model_call_details.get("litellm_params", {})
+            if litellm_params.get("no-log", False) == True:
+                # proxy cost tracking cal backs should run
+                if not (
+                    isinstance(callback, CustomLogger)
+                    and "_PROXY_" in callback.__class__.__name__
+                ):
+                    print_verbose("no-log request, skipping logging")
+                    continue
             try:
+                if kwargs.get("no-log", False) == True:
+                    print_verbose("no-log request, skipping logging")
+                    continue
                 if callback == "cache" and litellm.cache is not None:
                     # set_cache once complete streaming response is built
                     print_verbose("async success_callback: reaches cache for logging!")
@@ -2271,6 +2342,12 @@ def client(original_function):
                 or call_type == CallTypes.text_completion.value
             ):
                 messages = args[0] if len(args) > 0 else kwargs["prompt"]
+            elif (
+                call_type == CallTypes.atranscription.value
+                or call_type == CallTypes.transcription.value
+            ):
+                _file_name: BinaryIO = args[1] if len(args) > 1 else kwargs["file"]
+                messages = "audio_file"
             stream = True if "stream" in kwargs and kwargs["stream"] == True else False
             logging_obj = Logging(
                 model=model,
@@ -2411,6 +2488,7 @@ def client(original_function):
                 and kwargs.get("aembedding", False) != True
                 and kwargs.get("acompletion", False) != True
                 and kwargs.get("aimg_generation", False) != True
+                and kwargs.get("atranscription", False) != True
             ):  # allow users to control returning cached responses from the completion function
                 # checking cache
                 print_verbose(f"INSIDE CHECKING CACHE")
@@ -2567,6 +2645,8 @@ def client(original_function):
             elif "aembedding" in kwargs and kwargs["aembedding"] == True:
                 return result
             elif "aimg_generation" in kwargs and kwargs["aimg_generation"] == True:
+                return result
+            elif "atranscription" in kwargs and kwargs["atranscription"] == True:
                 return result
 
             ### POST-CALL RULES ###
@@ -2811,6 +2891,19 @@ def client(original_function):
                                 model_response_object=EmbeddingResponse(),
                                 response_type="embedding",
                             )
+                        elif call_type == CallTypes.atranscription.value and isinstance(
+                            cached_result, dict
+                        ):
+                            hidden_params = {
+                                "model": "whisper-1",
+                                "custom_llm_provider": custom_llm_provider,
+                            }
+                            cached_result = convert_to_model_response_object(
+                                response_object=cached_result,
+                                model_response_object=TranscriptionResponse(),
+                                response_type="audio_transcription",
+                                hidden_params=hidden_params,
+                            )
                         if kwargs.get("stream", False) == False:
                             # LOG SUCCESS
                             asyncio.create_task(
@@ -2937,6 +3030,20 @@ def client(original_function):
                 else:
                     return result
 
+            # ADD HIDDEN PARAMS - additional call metadata
+            if hasattr(result, "_hidden_params"):
+                result._hidden_params["model_id"] = kwargs.get("model_info", {}).get(
+                    "id", None
+                )
+            if (
+                isinstance(result, ModelResponse)
+                or isinstance(result, EmbeddingResponse)
+                or isinstance(result, TranscriptionResponse)
+            ):
+                result._response_ms = (
+                    end_time - start_time
+                ).total_seconds() * 1000  # return response latency in ms like openai
+
             ### POST-CALL RULES ###
             post_call_processing(original_response=result, model=model)
 
@@ -2949,8 +3056,10 @@ def client(original_function):
                 )
                 and (kwargs.get("cache", {}).get("no-store", False) != True)
             ):
-                if isinstance(result, litellm.ModelResponse) or isinstance(
-                    result, litellm.EmbeddingResponse
+                if (
+                    isinstance(result, litellm.ModelResponse)
+                    or isinstance(result, litellm.EmbeddingResponse)
+                    or isinstance(result, TranscriptionResponse)
                 ):
                     if (
                         isinstance(result, EmbeddingResponse)
@@ -2985,25 +3094,16 @@ def client(original_function):
             print_verbose(
                 f"Async Wrapper: Completed Call, calling async_success_handler: {logging_obj.async_success_handler}"
             )
+            # check if user does not want this to be logged
             asyncio.create_task(
                 logging_obj.async_success_handler(result, start_time, end_time)
             )
             threading.Thread(
-                target=logging_obj.success_handler, args=(result, start_time, end_time)
+                target=logging_obj.success_handler,
+                args=(result, start_time, end_time),
             ).start()
 
-            # RETURN RESULT
-            if hasattr(result, "_hidden_params"):
-                result._hidden_params["model_id"] = kwargs.get("model_info", {}).get(
-                    "id", None
-                )
-            if isinstance(result, ModelResponse) or isinstance(
-                result, EmbeddingResponse
-            ):
-                result._response_ms = (
-                    end_time - start_time
-                ).total_seconds() * 1000  # return response latency in ms like openai
-
+            # REBUILD EMBEDDING CACHING
             if (
                 isinstance(result, EmbeddingResponse)
                 and final_embedding_cached_response is not None
@@ -3510,6 +3610,20 @@ def cost_per_token(
                 model_cost_ref[model]["output_cost_per_token"] * completion_tokens
             )
         elif (
+            model_cost_ref[model].get("output_cost_per_second", None) is not None
+            and response_time_ms is not None
+        ):
+            print_verbose(
+                f"For model={model} - output_cost_per_second: {model_cost_ref[model].get('output_cost_per_second')}; response time: {response_time_ms}"
+            )
+            ## COST PER SECOND ##
+            prompt_tokens_cost_usd_dollar = 0
+            completion_tokens_cost_usd_dollar = (
+                model_cost_ref[model]["output_cost_per_second"]
+                * response_time_ms
+                / 1000
+            )
+        elif (
             model_cost_ref[model].get("input_cost_per_second", None) is not None
             and response_time_ms is not None
         ):
@@ -3593,6 +3707,8 @@ def completion_cost(
         "text_completion",
         "image_generation",
         "aimage_generation",
+        "transcription",
+        "atranscription",
     ] = "completion",
     ### REGION ###
     custom_llm_provider=None,
@@ -3628,7 +3744,6 @@ def completion_cost(
         - If an error occurs during execution, the function returns 0.0 without blocking the user's execution path.
     """
     try:
-
         if (
             (call_type == "aimage_generation" or call_type == "image_generation")
             and model is not None
@@ -3651,10 +3766,15 @@ def completion_cost(
             verbose_logger.debug(
                 f"completion_response response ms: {completion_response.get('_response_ms')} "
             )
-            model = (
-                model or completion_response["model"]
+            model = model or completion_response.get(
+                "model", None
             )  # check if user passed an override for model, if it's none check completion_response['model']
             if hasattr(completion_response, "_hidden_params"):
+                if (
+                    completion_response._hidden_params.get("model", None) is not None
+                    and len(completion_response._hidden_params["model"]) > 0
+                ):
+                    model = completion_response._hidden_params.get("model", model)
                 custom_llm_provider = completion_response._hidden_params.get(
                     "custom_llm_provider", ""
                 )
@@ -3735,6 +3855,7 @@ def completion_cost(
         # see https://replicate.com/pricing
         elif model in litellm.replicate_models or "replicate" in model:
             return get_replicate_completion_pricing(completion_response, total_time)
+
         (
             prompt_tokens_cost_usd_dollar,
             completion_tokens_cost_usd_dollar,
@@ -3892,6 +4013,7 @@ def get_litellm_params(
     proxy_server_request=None,
     acompletion=None,
     preset_cache_key=None,
+    no_log=None,
 ):
     litellm_params = {
         "acompletion": acompletion,
@@ -3908,6 +4030,7 @@ def get_litellm_params(
         "model_info": model_info,
         "proxy_server_request": proxy_server_request,
         "preset_cache_key": preset_cache_key,
+        "no-log": no_log,
         "stream_response": {},  # litellm_call_id: ModelResponse Dict
     }
 
@@ -4228,15 +4351,9 @@ def get_optional_params(
     ## raise exception if provider doesn't support passed in param
     if custom_llm_provider == "anthropic":
         ## check if unsupported param passed in
-        supported_params = [
-            "stream",
-            "stop",
-            "temperature",
-            "top_p",
-            "max_tokens",
-            "tools",
-            "tool_choice",
-        ]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
         # handle anthropic params
         if stream:
@@ -4260,17 +4377,9 @@ def get_optional_params(
             optional_params["tools"] = tools
     elif custom_llm_provider == "cohere":
         ## check if unsupported param passed in
-        supported_params = [
-            "stream",
-            "temperature",
-            "max_tokens",
-            "logit_bias",
-            "top_p",
-            "frequency_penalty",
-            "presence_penalty",
-            "stop",
-            "n",
-        ]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
         # handle cohere params
         if stream:
@@ -4293,14 +4402,9 @@ def get_optional_params(
             optional_params["stop_sequences"] = stop
     elif custom_llm_provider == "maritalk":
         ## check if unsupported param passed in
-        supported_params = [
-            "stream",
-            "temperature",
-            "max_tokens",
-            "top_p",
-            "presence_penalty",
-            "stop",
-        ]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
         # handle cohere params
         if stream:
@@ -4319,14 +4423,9 @@ def get_optional_params(
             optional_params["stopping_tokens"] = stop
     elif custom_llm_provider == "replicate":
         ## check if unsupported param passed in
-        supported_params = [
-            "stream",
-            "temperature",
-            "max_tokens",
-            "top_p",
-            "stop",
-            "seed",
-        ]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
 
         if stream:
@@ -4347,7 +4446,9 @@ def get_optional_params(
             optional_params["stop_sequences"] = stop
     elif custom_llm_provider == "huggingface":
         ## check if unsupported param passed in
-        supported_params = ["stream", "temperature", "max_tokens", "top_p", "stop", "n"]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
         # temperature, top_p, n, stream, stop, max_tokens, n, presence_penalty default to None
         if temperature is not None:
@@ -4386,16 +4487,9 @@ def get_optional_params(
             )  # since we handle translating echo, we should not send it to TGI request
     elif custom_llm_provider == "together_ai":
         ## check if unsupported param passed in
-        supported_params = [
-            "stream",
-            "temperature",
-            "max_tokens",
-            "top_p",
-            "stop",
-            "frequency_penalty",
-            "tools",
-            "tool_choice",
-        ]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
 
         if stream:
@@ -4416,16 +4510,9 @@ def get_optional_params(
             optional_params["tool_choice"] = tool_choice
     elif custom_llm_provider == "ai21":
         ## check if unsupported param passed in
-        supported_params = [
-            "stream",
-            "n",
-            "temperature",
-            "max_tokens",
-            "top_p",
-            "stop",
-            "frequency_penalty",
-            "presence_penalty",
-        ]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
 
         if stream:
@@ -4448,7 +4535,9 @@ def get_optional_params(
         custom_llm_provider == "palm" or custom_llm_provider == "gemini"
     ):  # https://developers.generativeai.google/tutorials/curl_quickstart
         ## check if unsupported param passed in
-        supported_params = ["temperature", "top_p", "stream", "n", "stop", "max_tokens"]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
 
         if temperature is not None:
@@ -4477,14 +4566,9 @@ def get_optional_params(
     ):
         print_verbose(f"(start) INSIDE THE VERTEX AI OPTIONAL PARAM BLOCK")
         ## check if unsupported param passed in
-        supported_params = [
-            "temperature",
-            "top_p",
-            "max_tokens",
-            "stream",
-            "tools",
-            "tool_choice",
-        ]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
 
         if temperature is not None:
@@ -4514,7 +4598,9 @@ def get_optional_params(
         )
     elif custom_llm_provider == "sagemaker":
         ## check if unsupported param passed in
-        supported_params = ["stream", "temperature", "max_tokens", "top_p", "stop", "n"]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
         # temperature, top_p, n, stream, stop, max_tokens, n, presence_penalty default to None
         if temperature is not None:
@@ -4541,8 +4627,10 @@ def get_optional_params(
                 max_tokens = 1
             optional_params["max_new_tokens"] = max_tokens
     elif custom_llm_provider == "bedrock":
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         if "ai21" in model:
-            supported_params = ["max_tokens", "temperature", "top_p", "stream"]
             _check_valid_arg(supported_params=supported_params)
             # params "maxTokens":200,"temperature":0,"topP":250,"stop_sequences":[],
             # https://us-west-2.console.aws.amazon.com/bedrock/home?region=us-west-2#/providers?model=j2-ultra
@@ -4555,9 +4643,6 @@ def get_optional_params(
             if stream:
                 optional_params["stream"] = stream
         elif "anthropic" in model:
-            supported_params = get_mapped_model_params(
-                model=model, custom_llm_provider=custom_llm_provider
-            )
             _check_valid_arg(supported_params=supported_params)
             # anthropic params on bedrock
             # \"max_tokens_to_sample\":300,\"temperature\":0.5,\"top_p\":1,\"stop_sequences\":[\"\\\\n\\\\nHuman:\"]}"
@@ -4574,7 +4659,6 @@ def get_optional_params(
                     optional_params=optional_params,
                 )
         elif "amazon" in model:  # amazon titan llms
-            supported_params = ["max_tokens", "temperature", "stop", "top_p", "stream"]
             _check_valid_arg(supported_params=supported_params)
             # see https://us-west-2.console.aws.amazon.com/bedrock/home?region=us-west-2#/providers?model=titan-large
             if max_tokens is not None:
@@ -4591,7 +4675,6 @@ def get_optional_params(
             if stream:
                 optional_params["stream"] = stream
         elif "meta" in model:  # amazon / meta llms
-            supported_params = ["max_tokens", "temperature", "top_p", "stream"]
             _check_valid_arg(supported_params=supported_params)
             # see https://us-west-2.console.aws.amazon.com/bedrock/home?region=us-west-2#/providers?model=titan-large
             if max_tokens is not None:
@@ -4603,7 +4686,6 @@ def get_optional_params(
             if stream:
                 optional_params["stream"] = stream
         elif "cohere" in model:  # cohere models on bedrock
-            supported_params = ["stream", "temperature", "max_tokens"]
             _check_valid_arg(supported_params=supported_params)
             # handle cohere params
             if stream:
@@ -4613,7 +4695,6 @@ def get_optional_params(
             if max_tokens is not None:
                 optional_params["max_tokens"] = max_tokens
         elif "mistral" in model:
-            supported_params = ["max_tokens", "temperature", "stop", "top_p", "stream"]
             _check_valid_arg(supported_params=supported_params)
             # mistral params on bedrock
             # \"max_tokens\":400,\"temperature\":0.7,\"top_p\":0.7,\"stop\":[\"\\\\n\\\\nHuman:\"]}"
@@ -4657,7 +4738,9 @@ def get_optional_params(
             optional_params["stop_sequences"] = stop
     elif custom_llm_provider == "cloudflare":
         # https://developers.cloudflare.com/workers-ai/models/text-generation/#input
-        supported_params = ["max_tokens", "stream"]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
 
         if max_tokens is not None:
@@ -4665,14 +4748,9 @@ def get_optional_params(
         if stream is not None:
             optional_params["stream"] = stream
     elif custom_llm_provider == "ollama":
-        supported_params = [
-            "max_tokens",
-            "stream",
-            "top_p",
-            "temperature",
-            "frequency_penalty",
-            "stop",
-        ]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
 
         if max_tokens is not None:
@@ -4696,16 +4774,9 @@ def get_optional_params(
             non_default_params=non_default_params, optional_params=optional_params
         )
     elif custom_llm_provider == "nlp_cloud":
-        supported_params = [
-            "max_tokens",
-            "stream",
-            "temperature",
-            "top_p",
-            "presence_penalty",
-            "frequency_penalty",
-            "n",
-            "stop",
-        ]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
 
         if max_tokens is not None:
@@ -4725,7 +4796,9 @@ def get_optional_params(
         if stop is not None:
             optional_params["stop_sequences"] = stop
     elif custom_llm_provider == "petals":
-        supported_params = ["max_tokens", "temperature", "top_p", "stream"]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
         # max_new_tokens=1,temperature=0.9, top_p=0.6
         if max_tokens is not None:
@@ -4737,18 +4810,9 @@ def get_optional_params(
         if stream:
             optional_params["stream"] = stream
     elif custom_llm_provider == "deepinfra":
-        supported_params = [
-            "temperature",
-            "top_p",
-            "n",
-            "stream",
-            "stop",
-            "max_tokens",
-            "presence_penalty",
-            "frequency_penalty",
-            "logit_bias",
-            "user",
-        ]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
         if temperature is not None:
             if (
@@ -4775,14 +4839,9 @@ def get_optional_params(
         if user:
             optional_params["user"] = user
     elif custom_llm_provider == "perplexity":
-        supported_params = [
-            "temperature",
-            "top_p",
-            "stream",
-            "max_tokens",
-            "presence_penalty",
-            "frequency_penalty",
-        ]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
         if temperature is not None:
             if (
@@ -4801,15 +4860,9 @@ def get_optional_params(
         if frequency_penalty:
             optional_params["frequency_penalty"] = frequency_penalty
     elif custom_llm_provider == "anyscale":
-        supported_params = [
-            "temperature",
-            "top_p",
-            "stream",
-            "max_tokens",
-            "stop",
-            "frequency_penalty",
-            "presence_penalty",
-        ]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         if model in [
             "mistralai/Mistral-7B-Instruct-v0.1",
             "mistralai/Mixtral-8x7B-Instruct-v0.1",
@@ -4837,14 +4890,9 @@ def get_optional_params(
         if max_tokens:
             optional_params["max_tokens"] = max_tokens
     elif custom_llm_provider == "mistral":
-        supported_params = [
-            "temperature",
-            "top_p",
-            "stream",
-            "max_tokens",
-            "tools",
-            "tool_choice",
-        ]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
         if temperature is not None:
             optional_params["temperature"] = temperature
@@ -4871,25 +4919,9 @@ def get_optional_params(
             extra_body  # openai client supports `extra_body` param
         )
     elif custom_llm_provider == "openrouter":
-        supported_params = [
-            "functions",
-            "function_call",
-            "temperature",
-            "top_p",
-            "n",
-            "stream",
-            "stop",
-            "max_tokens",
-            "presence_penalty",
-            "frequency_penalty",
-            "logit_bias",
-            "user",
-            "response_format",
-            "seed",
-            "tools",
-            "tool_choice",
-            "max_retries",
-        ]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
         _check_valid_arg(supported_params=supported_params)
 
         if functions is not None:
@@ -4943,28 +4975,9 @@ def get_optional_params(
         )
     else:  # assume passing in params for openai/azure openai
         print_verbose(f"UNMAPPED PROVIDER, ASSUMING IT'S OPENAI/AZURE")
-        supported_params = [
-            "functions",
-            "function_call",
-            "temperature",
-            "top_p",
-            "n",
-            "stream",
-            "stop",
-            "max_tokens",
-            "presence_penalty",
-            "frequency_penalty",
-            "logit_bias",
-            "user",
-            "response_format",
-            "seed",
-            "tools",
-            "tool_choice",
-            "max_retries",
-            "logprobs",
-            "top_logprobs",
-            "extra_headers",
-        ]
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider="openai"
+        )
         _check_valid_arg(supported_params=supported_params)
         if functions is not None:
             optional_params["functions"] = functions
@@ -5022,15 +5035,228 @@ def get_optional_params(
     return optional_params
 
 
-def get_mapped_model_params(model: str, custom_llm_provider: str):
+def get_supported_openai_params(model: str, custom_llm_provider: str):
     """
     Returns the supported openai params for a given model + provider
+
+    Example:
+    ```
+    get_supported_openai_params(model="anthropic.claude-3", custom_llm_provider="bedrock")
+    ```
     """
     if custom_llm_provider == "bedrock":
         if model.startswith("anthropic.claude-3"):
             return litellm.AmazonAnthropicClaude3Config().get_supported_openai_params()
-        else:
+        elif model.startswith("anthropic"):
             return litellm.AmazonAnthropicConfig().get_supported_openai_params()
+        elif model.startswith("ai21"):
+            return ["max_tokens", "temperature", "top_p", "stream"]
+        elif model.startswith("amazon"):
+            return ["max_tokens", "temperature", "stop", "top_p", "stream"]
+        elif model.startswith("meta"):
+            return ["max_tokens", "temperature", "top_p", "stream"]
+        elif model.startswith("cohere"):
+            return ["stream", "temperature", "max_tokens"]
+        elif model.startswith("mistral"):
+            return ["max_tokens", "temperature", "stop", "top_p", "stream"]
+    elif custom_llm_provider == "ollama_chat":
+        return litellm.OllamaChatConfig().get_supported_openai_params()
+    elif custom_llm_provider == "anthropic":
+        return [
+            "stream",
+            "stop",
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "tools",
+            "tool_choice",
+        ]
+    elif custom_llm_provider == "cohere":
+        return [
+            "stream",
+            "temperature",
+            "max_tokens",
+            "logit_bias",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "stop",
+            "n",
+        ]
+    elif custom_llm_provider == "maritalk":
+        return [
+            "stream",
+            "temperature",
+            "max_tokens",
+            "top_p",
+            "presence_penalty",
+            "stop",
+        ]
+    elif custom_llm_provider == "openai" or custom_llm_provider == "azure":
+        return [
+            "functions",
+            "function_call",
+            "temperature",
+            "top_p",
+            "n",
+            "stream",
+            "stop",
+            "max_tokens",
+            "presence_penalty",
+            "frequency_penalty",
+            "logit_bias",
+            "user",
+            "response_format",
+            "seed",
+            "tools",
+            "tool_choice",
+            "max_retries",
+            "logprobs",
+            "top_logprobs",
+            "extra_headers",
+        ]
+    elif custom_llm_provider == "openrouter":
+        return [
+            "functions",
+            "function_call",
+            "temperature",
+            "top_p",
+            "n",
+            "stream",
+            "stop",
+            "max_tokens",
+            "presence_penalty",
+            "frequency_penalty",
+            "logit_bias",
+            "user",
+            "response_format",
+            "seed",
+            "tools",
+            "tool_choice",
+            "max_retries",
+        ]
+    elif custom_llm_provider == "mistral":
+        return [
+            "temperature",
+            "top_p",
+            "stream",
+            "max_tokens",
+            "tools",
+            "tool_choice",
+        ]
+    elif custom_llm_provider == "replicate":
+        return [
+            "stream",
+            "temperature",
+            "max_tokens",
+            "top_p",
+            "stop",
+            "seed",
+        ]
+    elif custom_llm_provider == "huggingface":
+        return ["stream", "temperature", "max_tokens", "top_p", "stop", "n"]
+    elif custom_llm_provider == "together_ai":
+        return [
+            "stream",
+            "temperature",
+            "max_tokens",
+            "top_p",
+            "stop",
+            "frequency_penalty",
+            "tools",
+            "tool_choice",
+        ]
+    elif custom_llm_provider == "ai21":
+        return [
+            "stream",
+            "n",
+            "temperature",
+            "max_tokens",
+            "top_p",
+            "stop",
+            "frequency_penalty",
+            "presence_penalty",
+        ]
+    elif custom_llm_provider == "palm" or custom_llm_provider == "gemini":
+        return ["temperature", "top_p", "stream", "n", "stop", "max_tokens"]
+    elif custom_llm_provider == "vertex_ai":
+        return [
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "stream",
+            "tools",
+            "tool_choice",
+        ]
+    elif custom_llm_provider == "sagemaker":
+        return ["stream", "temperature", "max_tokens", "top_p", "stop", "n"]
+    elif custom_llm_provider == "aleph_alpha":
+        return [
+            "max_tokens",
+            "stream",
+            "top_p",
+            "temperature",
+            "presence_penalty",
+            "frequency_penalty",
+            "n",
+            "stop",
+        ]
+    elif custom_llm_provider == "cloudflare":
+        return ["max_tokens", "stream"]
+    elif custom_llm_provider == "ollama":
+        return [
+            "max_tokens",
+            "stream",
+            "top_p",
+            "temperature",
+            "frequency_penalty",
+            "stop",
+        ]
+    elif custom_llm_provider == "nlp_cloud":
+        return [
+            "max_tokens",
+            "stream",
+            "temperature",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "n",
+            "stop",
+        ]
+    elif custom_llm_provider == "petals":
+        return ["max_tokens", "temperature", "top_p", "stream"]
+    elif custom_llm_provider == "deepinfra":
+        return [
+            "temperature",
+            "top_p",
+            "n",
+            "stream",
+            "stop",
+            "max_tokens",
+            "presence_penalty",
+            "frequency_penalty",
+            "logit_bias",
+            "user",
+        ]
+    elif custom_llm_provider == "perplexity":
+        return [
+            "temperature",
+            "top_p",
+            "stream",
+            "max_tokens",
+            "presence_penalty",
+            "frequency_penalty",
+        ]
+    elif custom_llm_provider == "anyscale":
+        return [
+            "temperature",
+            "top_p",
+            "stream",
+            "max_tokens",
+            "stop",
+            "frequency_penalty",
+            "presence_penalty",
+        ]
 
 
 def get_llm_provider(
@@ -6135,14 +6361,15 @@ def convert_to_streaming_response(response_object: Optional[dict] = None):
 def convert_to_model_response_object(
     response_object: Optional[dict] = None,
     model_response_object: Optional[
-        Union[ModelResponse, EmbeddingResponse, ImageResponse]
+        Union[ModelResponse, EmbeddingResponse, ImageResponse, TranscriptionResponse]
     ] = None,
     response_type: Literal[
-        "completion", "embedding", "image_generation"
+        "completion", "embedding", "image_generation", "audio_transcription"
     ] = "completion",
     stream=False,
     start_time=None,
     end_time=None,
+    hidden_params: Optional[dict] = None,
 ):
     try:
         if response_type == "completion" and (
@@ -6202,6 +6429,9 @@ def convert_to_model_response_object(
                     end_time - start_time
                 ).total_seconds() * 1000
 
+            if hidden_params is not None:
+                model_response_object._hidden_params = hidden_params
+
             return model_response_object
         elif response_type == "embedding" and (
             model_response_object is None
@@ -6231,6 +6461,9 @@ def convert_to_model_response_object(
                     end_time - start_time
                 ).total_seconds() * 1000  # return response latency in ms like openai
 
+            if hidden_params is not None:
+                model_response_object._hidden_params = hidden_params
+
             return model_response_object
         elif response_type == "image_generation" and (
             model_response_object is None
@@ -6248,6 +6481,25 @@ def convert_to_model_response_object(
             if "data" in response_object:
                 model_response_object.data = response_object["data"]
 
+            if hidden_params is not None:
+                model_response_object._hidden_params = hidden_params
+
+            return model_response_object
+        elif response_type == "audio_transcription" and (
+            model_response_object is None
+            or isinstance(model_response_object, TranscriptionResponse)
+        ):
+            if response_object is None:
+                raise Exception("Error in response object format")
+
+            if model_response_object is None:
+                model_response_object = TranscriptionResponse()
+
+            if "text" in response_object:
+                model_response_object.text = response_object["text"]
+
+            if hidden_params is not None:
+                model_response_object._hidden_params = hidden_params
             return model_response_object
     except Exception as e:
         raise Exception(f"Invalid response object {traceback.format_exc()}")
@@ -7782,7 +8034,9 @@ def exception_type(
                             message=f"AzureException - {original_exception.message}",
                             llm_provider="azure",
                             model=model,
-                            request=original_exception.request,
+                            request=httpx.Request(
+                                method="POST", url="https://openai.com/"
+                            ),
                         )
                 else:
                     # if no status code then it is an APIConnectionError: https://github.com/openai/openai-python#handling-errors
@@ -7790,7 +8044,11 @@ def exception_type(
                         __cause__=original_exception.__cause__,
                         llm_provider="azure",
                         model=model,
-                        request=original_exception.request,
+                        request=getattr(
+                            original_exception,
+                            "request",
+                            httpx.Request(method="POST", url="https://openai.com/"),
+                        ),
                     )
         if (
             "BadRequestError.__init__() missing 1 required positional argument: 'param'"
@@ -8588,10 +8846,17 @@ class CustomStreamWrapper:
                 text = chunk_data.get("completions")[0].get("data").get("text")
                 is_finished = True
                 finish_reason = "stop"
-            # anthropic mapping
-            elif "completion" in chunk_data:
+            ######## bedrock.anthropic mappings ###############
+            elif "completion" in chunk_data:  # not claude-3
                 text = chunk_data["completion"]  # bedrock.anthropic
                 stop_reason = chunk_data.get("stop_reason", None)
+                if stop_reason != None:
+                    is_finished = True
+                    finish_reason = stop_reason
+            elif "delta" in chunk_data:
+                if chunk_data["delta"].get("text", None) is not None:
+                    text = chunk_data["delta"]["text"]
+                stop_reason = chunk_data["delta"].get("stop_reason", None)
                 if stop_reason != None:
                     is_finished = True
                     finish_reason = stop_reason
