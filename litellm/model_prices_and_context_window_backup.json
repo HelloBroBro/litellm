@@ -981,6 +981,22 @@
         "litellm_provider": "gemini",
         "mode": "chat"
     },
+    "command-r": {
+        "max_tokens": 128000, 
+        "max_input_tokens": 128000,
+        "max_output_tokens": 4096,
+        "input_cost_per_token": 0.00000050,
+        "output_cost_per_token": 0.0000015,
+        "litellm_provider": "cohere_chat",
+        "mode": "chat"
+    },
+    "command-light": {
+        "max_tokens": 4096,
+        "input_cost_per_token": 0.000015,
+        "output_cost_per_token": 0.000015,
+        "litellm_provider": "cohere_chat",
+        "mode": "chat"
+    },
     "command-nightly": {
         "max_tokens": 4096,
         "input_cost_per_token": 0.000015,
@@ -989,13 +1005,6 @@
         "mode": "completion"
     },
      "command": {
-        "max_tokens": 4096,
-        "input_cost_per_token": 0.000015,
-        "output_cost_per_token": 0.000015,
-        "litellm_provider": "cohere",
-        "mode": "completion"
-    },
-     "command-light": {
         "max_tokens": 4096,
         "input_cost_per_token": 0.000015,
         "output_cost_per_token": 0.000015,

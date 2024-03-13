@@ -480,12 +480,12 @@ class ModelResponse(OpenAIObject):
         object=None,
         system_fingerprint=None,
         usage=None,
-        stream=False,
+        stream=None,
         response_ms=None,
         hidden_params=None,
         **params,
     ):
-        if stream:
+        if stream is not None and stream == True:
             object = "chat.completion.chunk"
             choices = [StreamingChoices()]
         else:
@@ -3841,7 +3841,9 @@ def completion_cost(
                     * n
                 )
             else:
-                raise Exception(f"Model={model} not found in completion cost model map")
+                raise Exception(
+                    f"Model={image_gen_model_name} not found in completion cost model map"
+                )
         # Calculate cost based on prompt_tokens, completion_tokens
         if (
             "togethercomputer" in model
@@ -4269,6 +4271,7 @@ def get_optional_params(
             and custom_llm_provider != "together_ai"
             and custom_llm_provider != "mistral"
             and custom_llm_provider != "anthropic"
+            and custom_llm_provider != "cohere_chat"
             and custom_llm_provider != "bedrock"
             and custom_llm_provider != "ollama_chat"
         ):
@@ -4400,6 +4403,31 @@ def get_optional_params(
             optional_params["presence_penalty"] = presence_penalty
         if stop is not None:
             optional_params["stop_sequences"] = stop
+    elif custom_llm_provider == "cohere_chat":
+        ## check if unsupported param passed in
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
+        _check_valid_arg(supported_params=supported_params)
+        # handle cohere params
+        if stream:
+            optional_params["stream"] = stream
+        if temperature is not None:
+            optional_params["temperature"] = temperature
+        if max_tokens is not None:
+            optional_params["max_tokens"] = max_tokens
+        if n is not None:
+            optional_params["num_generations"] = n
+        if top_p is not None:
+            optional_params["p"] = top_p
+        if frequency_penalty is not None:
+            optional_params["frequency_penalty"] = frequency_penalty
+        if presence_penalty is not None:
+            optional_params["presence_penalty"] = presence_penalty
+        if stop is not None:
+            optional_params["stop_sequences"] = stop
+        if tools is not None:
+            optional_params["tools"] = tools
     elif custom_llm_provider == "maritalk":
         ## check if unsupported param passed in
         supported_params = get_supported_openai_params(
@@ -5083,6 +5111,19 @@ def get_supported_openai_params(model: str, custom_llm_provider: str):
             "stop",
             "n",
         ]
+    elif custom_llm_provider == "cohere_chat":
+        return [
+            "stream",
+            "temperature",
+            "max_tokens",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "stop",
+            "n",
+            "tools",
+            "tool_choice",
+        ]
     elif custom_llm_provider == "maritalk":
         return [
             "stream",
@@ -5371,6 +5412,9 @@ def get_llm_provider(
         ## cohere
         elif model in litellm.cohere_models or model in litellm.cohere_embedding_models:
             custom_llm_provider = "cohere"
+        ## cohere chat models
+        elif model in litellm.cohere_chat_models:
+            custom_llm_provider = "cohere_chat"
         ## replicate
         elif model in litellm.replicate_models or (":" in model and len(model) > 64):
             model_parts = model.split(":")
@@ -6422,7 +6466,7 @@ def convert_to_model_response_object(
                     "system_fingerprint"
                 ]
 
-            if "model" in response_object:
+            if "model" in response_object and model_response_object.model is None:
                 model_response_object.model = response_object["model"]
 
             if start_time is not None and end_time is not None:
@@ -7411,7 +7455,9 @@ def exception_type(
                         model=model,
                         response=original_exception.response,
                     )
-            elif custom_llm_provider == "cohere":  # Cohere
+            elif (
+                custom_llm_provider == "cohere" or custom_llm_provider == "cohere_chat"
+            ):  # Cohere
                 if (
                     "invalid api token" in error_str
                     or "No API key provided." in error_str
@@ -8544,6 +8590,29 @@ class CustomStreamWrapper:
         except:
             raise ValueError(f"Unable to parse response. Original response: {chunk}")
 
+    def handle_cohere_chat_chunk(self, chunk):
+        chunk = chunk.decode("utf-8")
+        data_json = json.loads(chunk)
+        print_verbose(f"chunk: {chunk}")
+        try:
+            text = ""
+            is_finished = False
+            finish_reason = ""
+            if "text" in data_json:
+                text = data_json["text"]
+            elif "is_finished" in data_json and data_json["is_finished"] == True:
+                is_finished = data_json["is_finished"]
+                finish_reason = data_json["finish_reason"]
+            else:
+                return
+            return {
+                "text": text,
+                "is_finished": is_finished,
+                "finish_reason": finish_reason,
+            }
+        except:
+            raise ValueError(f"Unable to parse response. Original response: {chunk}")
+
     def handle_azure_chunk(self, chunk):
         is_finished = False
         finish_reason = ""
@@ -8654,6 +8723,27 @@ class CustomStreamWrapper:
             }
         except Exception as e:
             traceback.print_exc()
+            raise e
+
+    def handle_azure_text_completion_chunk(self, chunk):
+        try:
+            print_verbose(f"\nRaw OpenAI Chunk\n{chunk}\n")
+            text = ""
+            is_finished = False
+            finish_reason = None
+            choices = getattr(chunk, "choices", [])
+            if len(choices) > 0:
+                text = choices[0].text
+                if choices[0].finish_reason is not None:
+                    is_finished = True
+                    finish_reason = choices[0].finish_reason
+            return {
+                "text": text,
+                "is_finished": is_finished,
+                "finish_reason": finish_reason,
+            }
+
+        except Exception as e:
             raise e
 
     def handle_openai_text_completion_chunk(self, chunk):
@@ -9052,6 +9142,15 @@ class CustomStreamWrapper:
                     model_response.choices[0].finish_reason = response_obj[
                         "finish_reason"
                     ]
+            elif self.custom_llm_provider == "cohere_chat":
+                response_obj = self.handle_cohere_chat_chunk(chunk)
+                if response_obj is None:
+                    return
+                completion_obj["content"] = response_obj["text"]
+                if response_obj["is_finished"]:
+                    model_response.choices[0].finish_reason = response_obj[
+                        "finish_reason"
+                    ]
             elif self.custom_llm_provider == "bedrock":
                 if self.sent_last_chunk:
                     raise StopIteration
@@ -9123,6 +9222,14 @@ class CustomStreamWrapper:
                     ]
             elif self.custom_llm_provider == "text-completion-openai":
                 response_obj = self.handle_openai_text_completion_chunk(chunk)
+                completion_obj["content"] = response_obj["text"]
+                print_verbose(f"completion obj content: {completion_obj['content']}")
+                if response_obj["is_finished"]:
+                    model_response.choices[0].finish_reason = response_obj[
+                        "finish_reason"
+                    ]
+            elif self.custom_llm_provider == "azure_text":
+                response_obj = self.handle_azure_text_completion_chunk(chunk)
                 completion_obj["content"] = response_obj["text"]
                 print_verbose(f"completion obj content: {completion_obj['content']}")
                 if response_obj["is_finished"]:
@@ -9364,14 +9471,18 @@ class CustomStreamWrapper:
     def __next__(self):
         try:
             while True:
-                if isinstance(self.completion_stream, str) or isinstance(
-                    self.completion_stream, bytes
+                if (
+                    isinstance(self.completion_stream, str)
+                    or isinstance(self.completion_stream, bytes)
+                    or isinstance(self.completion_stream, ModelResponse)
                 ):
                     chunk = self.completion_stream
                 else:
                     chunk = next(self.completion_stream)
                 if chunk is not None and chunk != b"":
-                    print_verbose(f"PROCESSED CHUNK PRE CHUNK CREATOR: {chunk}")
+                    print_verbose(
+                        f"PROCESSED CHUNK PRE CHUNK CREATOR: {chunk}; custom_llm_provider: {self.custom_llm_provider}"
+                    )
                     response: Optional[ModelResponse] = self.chunk_creator(chunk=chunk)
                     print_verbose(f"PROCESSED CHUNK POST CHUNK CREATOR: {response}")
 
@@ -9406,6 +9517,7 @@ class CustomStreamWrapper:
                 or self.custom_llm_provider == "azure"
                 or self.custom_llm_provider == "custom_openai"
                 or self.custom_llm_provider == "text-completion-openai"
+                or self.custom_llm_provider == "azure_text"
                 or self.custom_llm_provider == "huggingface"
                 or self.custom_llm_provider == "ollama"
                 or self.custom_llm_provider == "ollama_chat"
