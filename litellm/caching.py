@@ -142,7 +142,9 @@ class RedisCache(BaseCache):
                 )
             except Exception as e:
                 # NON blocking - notify users Redis is throwing an exception
-                print_verbose("LiteLLM Caching: set() - Got exception from REDIS : ", e)
+                print_verbose(
+                    f"LiteLLM Redis Caching: async set() - Got exception from REDIS : {str(e)}"
+                )
 
     async def async_set_cache_pipeline(self, cache_list, ttl=None):
         """
@@ -796,6 +798,7 @@ class Cache:
         host: Optional[str] = None,
         port: Optional[str] = None,
         password: Optional[str] = None,
+        namespace: Optional[str] = None,
         similarity_threshold: Optional[float] = None,
         supported_call_types: Optional[
             List[
@@ -888,6 +891,7 @@ class Cache:
             litellm._async_success_callback.append("cache")
         self.supported_call_types = supported_call_types  # default to ["completion", "acompletion", "embedding", "aembedding"]
         self.type = type
+        self.namespace = namespace
 
     def get_cache_key(self, *args, **kwargs):
         """
@@ -905,8 +909,11 @@ class Cache:
 
         # for streaming, we use preset_cache_key. It's created in wrapper(), we do this because optional params like max_tokens, get transformed for bedrock -> max_new_tokens
         if kwargs.get("litellm_params", {}).get("preset_cache_key", None) is not None:
-            print_verbose(f"\nReturning preset cache key: {cache_key}")
-            return kwargs.get("litellm_params", {}).get("preset_cache_key", None)
+            _preset_cache_key = kwargs.get("litellm_params", {}).get(
+                "preset_cache_key", None
+            )
+            print_verbose(f"\nReturning preset cache key: {_preset_cache_key}")
+            return _preset_cache_key
 
         # sort kwargs by keys, since model: [gpt-4, temperature: 0.2, max_tokens: 200] == [temperature: 0.2, max_tokens: 200, model: gpt-4]
         completion_kwargs = [
@@ -991,6 +998,9 @@ class Cache:
         # Hexadecimal representation of the hash
         hash_hex = hash_object.hexdigest()
         print_verbose(f"Hashed cache key (SHA-256): {hash_hex}")
+        if self.namespace is not None:
+            hash_hex = f"{self.namespace}:{hash_hex}"
+            print_verbose(f"Hashed Key with Namespace: {hash_hex}")
         return hash_hex
 
     def generate_streaming_content(self, content):
