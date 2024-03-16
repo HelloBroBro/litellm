@@ -144,9 +144,12 @@ from typing import Union
 try:
     # when using litellm cli
     import litellm.proxy.enterprise as enterprise
-except:
+except Exception as e:
     # when using litellm docker image
-    import enterprise  # type: ignore
+    try:
+        import enterprise  # type: ignore
+    except Exception as e:
+        pass
 
 ui_link = f"/ui/"
 ui_message = (
@@ -885,6 +888,9 @@ async def user_api_key_auth(
                     raise Exception(
                         f"This key is made for LiteLLM UI, Tried to access route: {route}. Not allowed"
                     )
+        if valid_token is None:
+            # No token was found when looking up in the DB
+            raise Exception("Invalid token passed")
         if valid_token_dict is not None:
             return UserAPIKeyAuth(api_key=api_key, **valid_token_dict)
         else:
@@ -1418,6 +1424,8 @@ async def update_cache(
         try:
             for _id in user_ids:
                 # Fetch the existing cost for the given user
+                if _id is None:
+                    continue
                 existing_spend_obj = await user_api_key_cache.async_get_cache(key=_id)
                 if existing_spend_obj is None:
                     # if user does not exist in LiteLLM_UserTable, create a new user
@@ -1789,6 +1797,16 @@ class ProxyConfig:
                                     _ENTERPRISE_PromptInjectionDetection()
                                 )
                                 imported_list.append(prompt_injection_detection_obj)
+                            elif (
+                                isinstance(callback, str)
+                                and callback == "batch_redis_requests"
+                            ):
+                                from litellm.proxy.hooks.batch_redis_get import (
+                                    _PROXY_BatchRedisRequests,
+                                )
+
+                                batch_redis_obj = _PROXY_BatchRedisRequests()
+                                imported_list.append(batch_redis_obj)
                             else:
                                 imported_list.append(
                                     get_instance_fn(
