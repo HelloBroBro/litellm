@@ -387,7 +387,12 @@ class BudgetRequest(LiteLLMBase):
 class KeyManagementSystem(enum.Enum):
     GOOGLE_KMS = "google_kms"
     AZURE_KEY_VAULT = "azure_key_vault"
+    AWS_SECRET_MANAGER = "aws_secret_manager"
     LOCAL = "local"
+
+
+class KeyManagementSettings(LiteLLMBase):
+    hosted_keys: List
 
 
 class TeamDefaultSettings(LiteLLMBase):
@@ -596,6 +601,22 @@ class LiteLLM_UserTable(LiteLLMBase):
             values.update({"spend": 0.0})
         if values.get("models") is None:
             values.update({"models": []})
+        return values
+
+    class Config:
+        protected_namespaces = ()
+
+
+class LiteLLM_EndUserTable(LiteLLMBase):
+    user_id: str
+    blocked: bool
+    alias: Optional[str] = None
+    spend: float = 0.0
+
+    @root_validator(pre=True)
+    def set_model_info(cls, values):
+        if values.get("spend") is None:
+            values.update({"spend": 0.0})
         return values
 
     class Config:
