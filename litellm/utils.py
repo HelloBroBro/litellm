@@ -65,6 +65,7 @@ from .integrations.langsmith import LangsmithLogger
 from .integrations.weights_biases import WeightsBiasesLogger
 from .integrations.custom_logger import CustomLogger
 from .integrations.langfuse import LangFuseLogger
+from .integrations.datadog import DataDogLogger
 from .integrations.dynamodb import DyanmoDBLogger
 from .integrations.s3 import S3Logger
 from .integrations.clickhouse import ClickhouseLogger
@@ -121,6 +122,7 @@ langsmithLogger = None
 weightsBiasesLogger = None
 customLogger = None
 langFuseLogger = None
+dataDogLogger = None
 dynamoLogger = None
 s3Logger = None
 genericAPILogger = None
@@ -1466,6 +1468,33 @@ class Logging:
                                 langfuse_secret=self.langfuse_secret,
                             )
                         langFuseLogger.log_event(
+                            kwargs=kwargs,
+                            response_obj=result,
+                            start_time=start_time,
+                            end_time=end_time,
+                            user_id=kwargs.get("user", None),
+                            print_verbose=print_verbose,
+                        )
+                    if callback == "datadog":
+                        global dataDogLogger
+                        verbose_logger.debug("reaches datadog for success logging!")
+                        kwargs = {}
+                        for k, v in self.model_call_details.items():
+                            if (
+                                k != "original_response"
+                            ):  # copy.deepcopy raises errors as this could be a coroutine
+                                kwargs[k] = v
+                        # this only logs streaming once, complete_streaming_response exists i.e when stream ends
+                        if self.stream:
+                            verbose_logger.debug(
+                                f"datadog: is complete_streaming_response in kwargs: {kwargs.get('complete_streaming_response', None)}"
+                            )
+                            if complete_streaming_response is None:
+                                continue
+                            else:
+                                print_verbose("reaches datadog for streaming logging!")
+                                result = kwargs["complete_streaming_response"]
+                        dataDogLogger.log_event(
                             kwargs=kwargs,
                             response_obj=result,
                             start_time=start_time,
@@ -6082,7 +6111,7 @@ def validate_environment(model: Optional[str] = None) -> dict:
 
 
 def set_callbacks(callback_list, function_id=None):
-    global sentry_sdk_instance, capture_exception, add_breadcrumb, posthog, slack_app, alerts_channel, traceloopLogger, athinaLogger, heliconeLogger, aispendLogger, berrispendLogger, supabaseClient, liteDebuggerClient, llmonitorLogger, promptLayerLogger, langFuseLogger, customLogger, weightsBiasesLogger, langsmithLogger, dynamoLogger, s3Logger
+    global sentry_sdk_instance, capture_exception, add_breadcrumb, posthog, slack_app, alerts_channel, traceloopLogger, athinaLogger, heliconeLogger, aispendLogger, berrispendLogger, supabaseClient, liteDebuggerClient, llmonitorLogger, promptLayerLogger, langFuseLogger, customLogger, weightsBiasesLogger, langsmithLogger, dynamoLogger, s3Logger, dataDogLogger
     try:
         for callback in callback_list:
             print_verbose(f"callback: {callback}")
@@ -6148,6 +6177,8 @@ def set_callbacks(callback_list, function_id=None):
                 promptLayerLogger = PromptLayerLogger()
             elif callback == "langfuse":
                 langFuseLogger = LangFuseLogger()
+            elif callback == "datadog":
+                dataDogLogger = DataDogLogger()
             elif callback == "dynamodb":
                 dynamoLogger = DyanmoDBLogger()
             elif callback == "s3":
@@ -9193,7 +9224,41 @@ class CustomStreamWrapper:
                 try:
                     if hasattr(chunk, "candidates") == True:
                         try:
-                            completion_obj["content"] = chunk.text
+                            try:
+                                completion_obj["content"] = chunk.text
+                            except Exception as e:
+                                if "Part has no text." in str(e):
+                                    ## check for function calling
+                                    function_call = (
+                                        chunk.candidates[0]
+                                        .content.parts[0]
+                                        .function_call
+                                    )
+                                    args_dict = {}
+                                    for k, v in function_call.args.items():
+                                        args_dict[k] = v
+                                    args_str = json.dumps(args_dict)
+                                    _delta_obj = litellm.utils.Delta(
+                                        content=None,
+                                        tool_calls=[
+                                            {
+                                                "id": f"call_{str(uuid.uuid4())}",
+                                                "function": {
+                                                    "arguments": args_str,
+                                                    "name": function_call.name,
+                                                },
+                                                "type": "function",
+                                            }
+                                        ],
+                                    )
+                                    _streaming_response = StreamingChoices(
+                                        delta=_delta_obj
+                                    )
+                                    _model_response = ModelResponse(stream=True)
+                                    _model_response.choices = [_streaming_response]
+                                    response_obj = {"original_chunk": _model_response}
+                                else:
+                                    raise e
                             if (
                                 hasattr(chunk.candidates[0], "finish_reason")
                                 and chunk.candidates[0].finish_reason.name
@@ -9204,7 +9269,7 @@ class CustomStreamWrapper:
                                         chunk.candidates[0].finish_reason.name
                                     )
                                 )
-                        except:
+                        except Exception as e:
                             if chunk.candidates[0].finish_reason.name == "SAFETY":
                                 raise Exception(
                                     f"The response was blocked by VertexAI. {str(chunk)}"

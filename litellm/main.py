@@ -12,6 +12,7 @@ from typing import Any, Literal, Union, BinaryIO
 from functools import partial
 import dotenv, traceback, random, asyncio, time, contextvars
 from copy import deepcopy
+
 import httpx
 import litellm
 from ._logging import verbose_logger
@@ -195,10 +196,10 @@ async def acompletion(
         api_version (str, optional): API version (default is None).
         api_key (str, optional): API key (default is None).
         model_list (list, optional): List of api base, version, keys
+        timeout (float, optional): The maximum execution time in seconds for the completion request.
 
         LITELLM Specific Params
         mock_response (str, optional): If provided, return a mock completion response for testing or debugging purposes (default is None).
-        force_timeout (int, optional): The maximum execution time in seconds for the completion request (default is 600).
         custom_llm_provider (str, optional): Used for Non-OpenAI LLMs, Example usage for bedrock, set model="amazon.titan-tg1-large" and custom_llm_provider="bedrock"
     Returns:
         ModelResponse: A response object containing the generated completion and associated metadata.
@@ -1780,9 +1781,11 @@ def completion(
             ## RESPONSE OBJECT
             response = response
         elif custom_llm_provider == "vllm":
+            custom_prompt_dict = custom_prompt_dict or litellm.custom_prompt_dict
             model_response = vllm.completion(
                 model=model,
                 messages=messages,
+                custom_prompt_dict=custom_prompt_dict,
                 model_response=model_response,
                 print_verbose=print_verbose,
                 optional_params=optional_params,
