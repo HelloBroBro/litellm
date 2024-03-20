@@ -12,7 +12,6 @@ from typing import Any, Literal, Union, BinaryIO
 from functools import partial
 import dotenv, traceback, random, asyncio, time, contextvars
 from copy import deepcopy
-
 import httpx
 import litellm
 from ._logging import verbose_logger
@@ -2614,7 +2613,7 @@ def embedding(
                 api_version or litellm.api_version or get_secret("AZURE_API_VERSION")
             )
 
-            azure_ad_token = kwargs.pop("azure_ad_token", None) or get_secret(
+            azure_ad_token = optional_params.pop("azure_ad_token", None) or get_secret(
                 "AZURE_AD_TOKEN"
             )
 
