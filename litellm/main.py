@@ -12,6 +12,7 @@ from typing import Any, Literal, Union, BinaryIO
 from functools import partial
 import dotenv, traceback, random, asyncio, time, contextvars
 from copy import deepcopy
+
 import httpx
 import litellm
 from ._logging import verbose_logger
@@ -1752,7 +1753,11 @@ def completion(
                 timeout=timeout,
             )
 
-            if "stream" in optional_params and optional_params["stream"] == True:
+            if (
+                "stream" in optional_params
+                and optional_params["stream"] == True
+                and not isinstance(response, CustomStreamWrapper)
+            ):
                 # don't try to access stream object,
                 if "ai21" in model:
                     response = CustomStreamWrapper(
