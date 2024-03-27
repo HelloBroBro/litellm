@@ -49,6 +49,15 @@ general_settings:
   disable_reset_budget: true
 ```
 
+## 4. Switch of `litellm.telemetry`
+
+Switch of all telemetry tracking done by litellm
+
+```yaml
+litellm_settings:
+  telemetry: False
+```
+
 ## Machine Specifications to Deploy LiteLLM
 
 | Service | Spec | CPUs | Memory | Architecture | Version|
@@ -79,6 +88,7 @@ spec:
       containers:
         - name: litellm-container
           image: ghcr.io/berriai/litellm:main-latest
+          imagePullPolicy: Always
           env:
             - name: AZURE_API_KEY
               value: "d6******"

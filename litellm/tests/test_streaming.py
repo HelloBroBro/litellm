@@ -824,6 +824,32 @@ def test_bedrock_claude_3_streaming():
         pytest.fail(f"Error occurred: {e}")
 
 
+def test_claude_3_streaming_finish_reason():
+    try:
+        litellm.set_verbose = True
+        messages = [
+            {"role": "system", "content": "Be helpful"},
+            {"role": "user", "content": "What do you know?"},
+        ]
+        response: ModelResponse = completion(
+            model="claude-3-opus-20240229",
+            messages=messages,
+            stream=True,
+        )
+        complete_response = ""
+        # Add any assertions here to check the response
+        num_finish_reason = 0
+        for idx, chunk in enumerate(response):
+            if isinstance(chunk, ModelResponse):
+                if chunk.choices[0].finish_reason is not None:
+                    num_finish_reason += 1
+        assert num_finish_reason == 1
+    except RateLimitError:
+        pass
+    except Exception as e:
+        pytest.fail(f"Error occurred: {e}")
+
+
 @pytest.mark.skip(reason="Replicate changed exceptions")
 def test_completion_replicate_stream_bad_key():
     try:
@@ -2212,3 +2238,71 @@ async def test_acompletion_claude_3_function_call_with_streaming():
         # raise Exception("it worked!")
     except Exception as e:
         pytest.fail(f"Error occurred: {e}")
+
+
+class ModelResponseIterator:
+    def __init__(self, model_response):
+        self.model_response = model_response
+        self.is_done = False
+
+    # Sync iterator
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.is_done:
+            raise StopIteration
+        self.is_done = True
+        return self.model_response
+
+    # Async iterator
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.is_done:
+            raise StopAsyncIteration
+        self.is_done = True
+        return self.model_response
+
+
+def test_unit_test_custom_stream_wrapper():
+    """
+    Test if last streaming chunk ends with '?', if the message repeats itself.
+    """
+    litellm.set_verbose = False
+    chunk = {
+        "id": "chatcmpl-123",
+        "object": "chat.completion.chunk",
+        "created": 1694268190,
+        "model": "gpt-3.5-turbo-0125",
+        "system_fingerprint": "fp_44709d6fcb",
+        "choices": [
+            {"index": 0, "delta": {"content": "How are you?"}, "finish_reason": "stop"}
+        ],
+    }
+    chunk = litellm.ModelResponse(**chunk, stream=True)
+
+    completion_stream = ModelResponseIterator(model_response=chunk)
+
+    response = litellm.CustomStreamWrapper(
+        completion_stream=completion_stream,
+        model="gpt-3.5-turbo",
+        custom_llm_provider="cached_response",
+        logging_obj=litellm.Logging(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": "Hey"}],
+            stream=True,
+            call_type="completion",
+            start_time=time.time(),
+            litellm_call_id="12345",
+            function_id="1245",
+        ),
+    )
+
+    freq = 0
+    for chunk in response:
+        if chunk.choices[0].delta.content is not None:
+            if "How are you?" in chunk.choices[0].delta.content:
+                freq += 1
+    assert freq == 1

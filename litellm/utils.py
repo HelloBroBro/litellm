@@ -354,7 +354,10 @@ class Choices(OpenAIObject):
         if message is None:
             self.message = Message(content=None)
         else:
-            self.message = message
+            if isinstance(message, Message):
+                self.message = message
+            elif isinstance(message, dict):
+                self.message = Message(**message)
         if logprobs is not None:
             self.logprobs = logprobs
         if enhancements is not None:
@@ -422,8 +425,11 @@ class StreamingChoices(OpenAIObject):
         else:
             self.finish_reason = None
         self.index = index
-        if delta:
-            self.delta = delta
+        if delta is not None:
+            if isinstance(delta, Delta):
+                self.delta = delta
+            if isinstance(delta, dict):
+                self.delta = Delta(**delta)
         else:
             self.delta = Delta()
         if enhancements is not None:
@@ -491,13 +497,33 @@ class ModelResponse(OpenAIObject):
     ):
         if stream is not None and stream == True:
             object = "chat.completion.chunk"
-            choices = [StreamingChoices()]
+            if choices is not None and isinstance(choices, list):
+                new_choices = []
+                for choice in choices:
+                    if isinstance(choice, StreamingChoices):
+                        _new_choice = choice
+                    elif isinstance(choice, dict):
+                        _new_choice = StreamingChoices(**choice)
+                    new_choices.append(_new_choice)
+                choices = new_choices
+            else:
+                choices = [StreamingChoices()]
         else:
             if model in litellm.open_ai_embedding_models:
                 object = "embedding"
             else:
                 object = "chat.completion"
-            choices = [Choices()]
+            if choices is not None and isinstance(choices, list):
+                new_choices = []
+                for choice in choices:
+                    if isinstance(choice, Choices):
+                        _new_choice = choice
+                    elif isinstance(choice, dict):
+                        _new_choice = Choices(**choice)
+                    new_choices.append(_new_choice)
+                choices = new_choices
+            else:
+                choices = [Choices()]
         if id is None:
             id = _generate_id()
         else:
@@ -7211,7 +7237,7 @@ def exception_type(
                         exception_mapping_worked = True
                         raise APIError(
                             status_code=original_exception.status_code,
-                            message=f"AnthropicException - {original_exception.message}",
+                            message=f"AnthropicException - {original_exception.message}. Handle with `litellm.APIError`.",
                             llm_provider="anthropic",
                             model=model,
                             request=original_exception.request,
@@ -8291,34 +8317,6 @@ def get_or_generate_uuid():
         # [Non-Blocking Error]
         return
     return uuid_value
-
-
-def litellm_telemetry(data):
-    # Load or generate the UUID
-    uuid_value = ""
-    try:
-        uuid_value = get_or_generate_uuid()
-    except:
-        uuid_value = str(uuid.uuid4())
-    try:
-        # Prepare the data to send to litellm logging api
-        try:
-            pkg_version = importlib.metadata.version("litellm")
-        except:
-            pkg_version = None
-        if "model" not in data:
-            data["model"] = None
-        payload = {"uuid": uuid_value, "data": data, "version:": pkg_version}
-        # Make the POST request to litellm logging api
-        response = requests.post(
-            "https://litellm-logging.onrender.com/logging",
-            headers={"Content-Type": "application/json"},
-            json=payload,
-        )
-        response.raise_for_status()  # Raise an exception for HTTP errors
-    except:
-        # [Non-Blocking Error]
-        return
 
 
 ######### Secret Manager ############################
@@ -9539,6 +9537,9 @@ class CustomStreamWrapper:
                 else:
                     return
             elif self.received_finish_reason is not None:
+                if self.sent_last_chunk == True:
+                    raise StopIteration
+
                 # flush any remaining holding chunk
                 if len(self.holding_chunk) > 0:
                     if model_response.choices[0].delta.content is None:
@@ -9552,6 +9553,7 @@ class CustomStreamWrapper:
                 is_delta_empty = self.is_delta_empty(
                     delta=model_response.choices[0].delta
                 )
+
                 if is_delta_empty:
                     # get any function call arguments
                     model_response.choices[0].finish_reason = map_finish_reason(
