@@ -298,6 +298,7 @@ class ProxyLogging:
             return
         else:
             user_info = str(user_info)
+
         # percent of max_budget left to spend
         if user_max_budget > 0:
             percent_left = (user_max_budget - user_current_spend) / user_max_budget
@@ -317,22 +318,35 @@ class ProxyLogging:
             )
             return
 
+        ## PREVENTITIVE ALERTING ## - https://github.com/BerriAI/litellm/issues/2727
+        # - Alert once within 28d period
+        # - Cache this information
+        # - Don't re-alert, if alert already sent
+        _cache: DualCache = self.call_details["user_api_key_cache"]
+
         # check if 5% of max budget is left
         if percent_left <= 0.05:
             message = "5% budget left for" + user_info
-            await self.alerting_handler(
-                message=message,
-                level="Medium",
-            )
+            result = await _cache.async_get_cache(key=message)
+            if result is None:
+                await self.alerting_handler(
+                    message=message,
+                    level="Medium",
+                )
+                await _cache.async_set_cache(key=message, value="SENT", ttl=2419200)
+
             return
 
         # check if 15% of max budget is left
         if percent_left <= 0.15:
             message = "15% budget left for" + user_info
-            await self.alerting_handler(
-                message=message,
-                level="Low",
-            )
+            result = await _cache.async_get_cache(key=message)
+            if result is None:
+                await self.alerting_handler(
+                    message=message,
+                    level="Low",
+                )
+                await _cache.async_set_cache(key=message, value="SENT", ttl=2419200)
             return
 
         return
@@ -449,16 +463,15 @@ class ProxyLogging:
         Covers:
         1. /chat/completions
         """
-        new_response = copy.deepcopy(response)
         for callback in litellm.callbacks:
             try:
                 if isinstance(callback, CustomLogger):
                     await callback.async_post_call_success_hook(
-                        user_api_key_dict=user_api_key_dict, response=new_response
+                        user_api_key_dict=user_api_key_dict, response=response
                     )
             except Exception as e:
                 raise e
-        return new_response
+        return response
 
     async def post_call_streaming_hook(
         self,
@@ -1013,6 +1026,8 @@ class PrismaClient:
                     t.max_budget AS team_max_budget, 
                     t.tpm_limit AS team_tpm_limit,
                     t.rpm_limit AS team_rpm_limit,
+                    t.models AS team_models,
+                    t.blocked AS team_blocked,
                     m.aliases as team_model_aliases
                     FROM "LiteLLM_VerificationToken" AS v
                     LEFT JOIN "LiteLLM_TeamTable" AS t ON v.team_id = t.team_id
@@ -1023,6 +1038,10 @@ class PrismaClient:
                     response = await self.db.query_first(query=sql_query)
 
                     if response is not None:
+                        if response["team_models"] is None:
+                            response["team_models"] = []
+                        if response["team_blocked"] is None:
+                            response["team_blocked"] = False
                         response = LiteLLM_VerificationTokenView(**response)
                         # for prisma we need to cast the expires time to str
                         if response.expires is not None and isinstance(
