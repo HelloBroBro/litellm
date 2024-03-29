@@ -1,7 +1,7 @@
 "use client";
 import React, { useState, useEffect } from "react";
 import { userInfoCall, modelAvailableCall, getTotalSpendCall } from "./networking";
-import { Grid, Col, Card, Text } from "@tremor/react";
+import { Grid, Col, Card, Text, Title } from "@tremor/react";
 import CreateKey from "./create_key_button";
 import ViewKeyTable from "./view_key_table";
 import ViewUserSpend from "./view_user_spend";
@@ -203,9 +203,11 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
     );
   }
 
+  console.log("inside user dashboard, selected team", selectedTeam);
+
   return (
-    <div>
-      <Grid numItems={1} className="gap-0 p-10 h-[75vh] w-full">
+      <div className="w-full mx-4">
+      <Grid numItems={1} className="gap-2 p-8 h-[75vh] w-full mt-2">
         <Col numColSpan={1}>
           <ViewUserSpend
             userID={userID}
@@ -213,22 +215,23 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
             userRole={userRole}
             accessToken={accessToken}
           />
+          <DashboardTeam teams={teams} setSelectedTeam={setSelectedTeam} />
+          <Title>API Keys</Title>
+          <CreateKey
+            key={selectedTeam ? selectedTeam.team_id : null}
+            userID={userID}
+            team={selectedTeam ? selectedTeam : null}
+            userRole={userRole}
+            accessToken={accessToken}
+            data={keys}
+            setData={setKeys}
+          />
           <ViewKeyTable
             userID={userID}
             accessToken={accessToken}
             data={keys}
             setData={setKeys}
           />
-          <CreateKey
-            userID={userID}
-            teamID={selectedTeam ? selectedTeam["team_id"] : null}
-            userRole={userRole}
-            userModels={userModels}
-            accessToken={accessToken}
-            data={keys}
-            setData={setKeys}
-          />
-          <DashboardTeam teams={teams} setSelectedTeam={setSelectedTeam} />
         </Col>
       </Grid>
     </div>

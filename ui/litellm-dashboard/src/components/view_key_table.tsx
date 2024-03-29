@@ -78,16 +78,17 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
   }
   console.log("RERENDER TRIGGERED");
   return (
-    <Card className="w-full mx-auto flex-auto overflow-y-auto max-h-[50vh] mb-4">
+    <div>
+    <Card className="w-full mx-auto flex-auto overflow-y-auto max-h-[50vh] mb-4 mt-2">
       <Table className="mt-5">
         <TableHead>
           <TableRow>
             <TableHeaderCell>Key Alias</TableHeaderCell>
             <TableHeaderCell>Secret Key</TableHeaderCell>
             <TableHeaderCell>Spend (USD)</TableHeaderCell>
-            <TableHeaderCell>Key Budget (USD)</TableHeaderCell>
+            <TableHeaderCell>Budget (USD)</TableHeaderCell>
             <TableHeaderCell>Spend Report</TableHeaderCell>
-            <TableHeaderCell>Team ID</TableHeaderCell>
+            <TableHeaderCell>Team</TableHeaderCell>
             <TableHeaderCell>Metadata</TableHeaderCell>
             <TableHeaderCell>Models</TableHeaderCell>
             <TableHeaderCell>TPM / RPM Limits</TableHeaderCell>
@@ -128,7 +129,7 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
                   {item.max_budget != null ? (
                     <Text>{item.max_budget}</Text>
                   ) : (
-                    <Text>Unlimited Budget</Text>
+                    <Text>Unlimited</Text>
                   )}
                 </TableCell>
                 <TableCell style={{ maxWidth: '2px' }}>
@@ -141,19 +142,28 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
                   />
                 </TableCell>
                 <TableCell style={{ maxWidth: "4px", whiteSpace: "pre-wrap", overflow: "hidden"  }}>
-                  <Text>{item.team_id}</Text>
+                  <Text>{item.team_alias && item.team_alias != "None" ? item.team_alias : item.team_id}</Text>
                 </TableCell>
                 <TableCell style={{ maxWidth: "4px", whiteSpace: "pre-wrap", overflow: "hidden"  }}>
                   <Text>{JSON.stringify(item.metadata).slice(0, 400)}</Text>
                   
                 </TableCell>
-                <TableCell style={{ maxWidth: "4px", whiteSpace: "pre-wrap", overflow: "hidden"  }}>
-                  <Text>{JSON.stringify(item.models)}</Text>
+
+                <TableCell style={{ maxWidth: "8-x", whiteSpace: "pre-wrap", overflow: "hidden" }}>
+                  {Array.isArray(item.models) ? (
+                    <div style={{ display: "flex", flexDirection: "column" }}>
+                      {item.models.map((model: string, index: number) => (
+                        <Badge key={index} size={"xs"} className="mb-1" color="blue">
+                           {model.length > 30 ? `${model.slice(0, 30)}...` : model}
+                        </Badge>
+                      ))}
+                    </div>
+                  ) : null}
                 </TableCell>
                 <TableCell style={{ maxWidth: "2px", overflowWrap: "break-word" }}>
                   <Text>
-                    TPM Limit: {item.tpm_limit ? item.tpm_limit : "Unlimited"}{" "}
-                    <br></br> RPM Limit:{" "}
+                    TPM: {item.tpm_limit ? item.tpm_limit : "Unlimited"}{" "}
+                    <br></br> RPM:{" "}
                     {item.rpm_limit ? item.rpm_limit : "Unlimited"}
                   </Text>
                 </TableCell>
@@ -221,6 +231,7 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
         </div>
       )}
     </Card>
+    </div>
   );
 };
 

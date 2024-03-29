@@ -17,6 +17,7 @@ import {
   Title,
   Icon,
 } from "@tremor/react";
+import { Statistic } from "antd"
 import { spendUsersCall }  from "./networking";
 
 
@@ -58,14 +59,8 @@ const ViewUserSpend: React.FC<ViewUserSpendProps> = ({ userID, userSpendData, us
 
     return (
         <>
-      <Card className="mx-auto mb-4">
-        <Metric>
-          ${roundedSpend}
-        </Metric>
-        <Title>
-            / {displayMaxBudget}
-        </Title>
-      </Card>
+        
+        <Statistic title="Total Spend" value={roundedSpend !== null ? roundedSpend : 0} /> / {displayMaxBudget}
     </>
     )
 }
