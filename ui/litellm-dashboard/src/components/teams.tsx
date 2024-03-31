@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { Typography } from "antd";
-import { teamDeleteCall } from "./networking";
+import { teamDeleteCall, teamUpdateCall } from "./networking";
 import { InformationCircleIcon, PencilAltIcon, PencilIcon, StatusOnlineIcon, TrashIcon } from "@heroicons/react/outline";
 import {
   Button as Button2,
@@ -37,6 +37,15 @@ interface TeamProps {
   userID: string | null;
   userRole: string | null;
 }
+
+interface EditTeamModalProps {
+  visible: boolean;
+  onCancel: () => void;
+  team: any; // Assuming TeamType is a type representing your team object
+  onSubmit: (data: FormData) => void; // Assuming FormData is the type of data to be submitted
+}
+
+
 import { teamCreateCall, teamMemberAddCall, Member, modelAvailableCall } from "./networking";
 
 const Team: React.FC<TeamProps> = ({
@@ -51,6 +60,8 @@ const Team: React.FC<TeamProps> = ({
   const [memberForm] = Form.useForm();
   const { Title, Paragraph } = Typography;
   const [value, setValue] = useState("");
+  const [editModalVisible, setEditModalVisible] = useState(false);
+
 
   const [selectedTeam, setSelectedTeam] = useState<null | any>(
     teams ? teams[0] : null
@@ -60,6 +71,124 @@ const Team: React.FC<TeamProps> = ({
   const [userModels, setUserModels] = useState([]);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [teamToDelete, setTeamToDelete] = useState<string | null>(null);
+
+
+  const EditTeamModal: React.FC<EditTeamModalProps> = ({ visible, onCancel, team, onSubmit }) => {
+  const [form] = Form.useForm();
+
+  const handleOk = () => {
+    form
+      .validateFields()
+      .then((values) => {
+        const updatedValues = {...values, team_id: team.team_id};
+        onSubmit(updatedValues);
+        form.resetFields();
+      })
+      .catch((error) => {
+        console.error("Validation failed:", error);
+      });
+};
+
+  return (
+      <Modal
+            title="Edit Team"
+            visible={visible}
+            width={800}
+            footer={null}
+            onOk={handleOk}
+            onCancel={onCancel}
+          >
+      <Form
+        form={form}
+        onFinish={handleEditSubmit}
+        initialValues={team} // Pass initial values here
+        labelCol={{ span: 8 }}
+        wrapperCol={{ span: 16 }}
+        labelAlign="left"
+      >
+              <>
+                <Form.Item 
+                  label="Team Name" 
+                  name="team_alias"
+                  rules={[{ required: true, message: 'Please input a team name' }]}
+                >
+                  <Input />
+                </Form.Item>
+                <Form.Item label="Models" name="models">
+                  <Select2
+                    mode="multiple"
+                    placeholder="Select models"
+                    style={{ width: "100%" }}
+                  >
+                    {userModels && userModels.map((model) => (
+                      <Select2.Option key={model} value={model}>
+                        {model}
+                      </Select2.Option>
+                    ))}
+                  </Select2>
+                </Form.Item>
+                <Form.Item label="Max Budget (USD)" name="max_budget">
+                  <InputNumber step={0.01} precision={2} width={200} />
+                </Form.Item>
+                <Form.Item
+                  label="Tokens per minute Limit (TPM)"
+                  name="tpm_limit"
+                >
+                  <InputNumber step={1} width={400} />
+                </Form.Item>
+                <Form.Item
+                  label="Requests per minute Limit (RPM)"
+                  name="rpm_limit"
+                >
+                  <InputNumber step={1} width={400} />
+                </Form.Item>
+                <Form.Item
+                  label="Requests per minute Limit (RPM)"
+                  name="team_id"
+                  hidden={true}
+                ></Form.Item>
+              </>
+              <div style={{ textAlign: "right", marginTop: "10px" }}>
+                <Button2 htmlType="submit">Edit Team</Button2>
+              </div>
+            </Form>
+    </Modal>
+  );
+};
+
+const handleEditClick = (team: any) => {
+  setSelectedTeam(team);
+  setEditModalVisible(true);
+};
+
+const handleEditCancel = () => {
+  setEditModalVisible(false);
+  setSelectedTeam(null);
+};
+
+const handleEditSubmit = async (formValues: Record<string, any>) => {
+  // Call API to update team with teamId and values
+  const teamId = formValues.team_id; // get team_id
+  
+  console.log("handleEditSubmit:", formValues);
+  if (accessToken == null) {
+    return;
+  }
+
+  let newTeamValues = await teamUpdateCall(accessToken, formValues);
+
+  // Update the teams state with the updated team data
+  if (teams) {
+    const updatedTeams = teams.map((team) =>
+      team.team_id === teamId ? newTeamValues.data : team
+    );
+    setTeams(updatedTeams);
+  }
+  message.success("Team updated successfully");
+
+  setEditModalVisible(false);
+  setSelectedTeam(null);
+};
 
   const handleOk = () => {
     setIsTeamModalVisible(false);
@@ -261,6 +390,7 @@ const Team: React.FC<TeamProps> = ({
                         <Icon
                             icon={PencilAltIcon}
                             size="sm"
+                            onClick={() => handleEditClick(team)}
                           />
                         <Icon
                             onClick={() => handleDelete(team.team_id)}
@@ -422,7 +552,6 @@ const Team: React.FC<TeamProps> = ({
                 <TableRow>
                   <TableHeaderCell>Member Name</TableHeaderCell>
                   <TableHeaderCell>Role</TableHeaderCell>
-                  {/* <TableHeaderCell>Action</TableHeaderCell> */}
                 </TableRow>
               </TableHead>
 
@@ -439,9 +568,6 @@ const Team: React.FC<TeamProps> = ({
                               : null}
                           </TableCell>
                           <TableCell>{member["role"]}</TableCell>
-                          {/* <TableCell>
-                            <Icon icon={CogIcon} size="sm" />
-                          </TableCell> */}
                         </TableRow>
                       )
                     )
@@ -449,6 +575,14 @@ const Team: React.FC<TeamProps> = ({
               </TableBody>
             </Table>
           </Card>
+          {selectedTeam && (
+        <EditTeamModal
+          visible={editModalVisible}
+          onCancel={handleEditCancel}
+          team={selectedTeam}
+          onSubmit={handleEditSubmit}
+        />
+      )}
         </Col>
         <Col numColSpan={1}>
           <Button
