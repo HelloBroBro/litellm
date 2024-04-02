@@ -191,6 +191,8 @@ class Router:
             redis_cache=redis_cache, in_memory_cache=InMemoryCache()
         )  # use a dual cache (Redis+In-Memory) for tracking cooldowns, usage, etc.
 
+        self.default_deployment = None  # use this to track the users default deployment, when they want to use model = *
+
         if model_list:
             model_list = copy.deepcopy(model_list)
             self.set_model_list(model_list)
@@ -252,7 +254,6 @@ class Router:
             }
         }
         """
-
         ### ROUTING SETUP ###
         if routing_strategy == "least-busy":
             self.leastbusy_logger = LeastBusyLoggingHandler(
@@ -1241,7 +1242,7 @@ class Router:
             ### CHECK IF RATE LIMIT / CONTEXT WINDOW ERROR w/ fallbacks available / Bad Request Error
             if (
                 isinstance(original_exception, litellm.ContextWindowExceededError)
-                and context_window_fallbacks is None
+                and context_window_fallbacks is not None
             ) or (
                 isinstance(original_exception, openai.RateLimitError)
                 and fallbacks is not None
@@ -1442,7 +1443,7 @@ class Router:
             ### CHECK IF RATE LIMIT / CONTEXT WINDOW ERROR
             if (
                 isinstance(original_exception, litellm.ContextWindowExceededError)
-                and context_window_fallbacks is None
+                and context_window_fallbacks is not None
             ) or (
                 isinstance(original_exception, openai.RateLimitError)
                 and fallbacks is not None
@@ -2078,6 +2079,11 @@ class Router:
                 ),
             )
 
+            # Check if user is trying to use model_name == "*"
+            # this is a catch all model for their specific api key
+            if model["model_name"] == "*":
+                self.default_deployment = model
+
             # Azure GPT-Vision Enhancements, users can pass os.environ/
             data_sources = model.get("litellm_params", {}).get("dataSources", [])
 
@@ -2170,7 +2176,7 @@ class Router:
         Filter out model in model group, if:
 
         - model context window < message length
-        - function call and model doesn't support function calling
+        - [TODO] function call and model doesn't support function calling
         """
         verbose_router_logger.debug(
             f"Starting Pre-call checks for deployments in model={model}"
@@ -2210,6 +2216,18 @@ class Router:
                 ):
                     invalid_model_indices.append(idx)
 
+        if len(invalid_model_indices) == len(_returned_deployments):
+            """
+            - no healthy deployments available b/c context window checks
+            """
+            raise litellm.ContextWindowExceededError(
+                message="Context Window exceeded for given call",
+                model=model,
+                llm_provider="",
+                response=httpx.Response(
+                    status_code=400, request=httpx.Request("GET", "https://example.com")
+                ),
+            )
         if len(invalid_model_indices) > 0:
             for idx in reversed(invalid_model_indices):
                 _returned_deployments.pop(idx)
@@ -2247,6 +2265,13 @@ class Router:
                 f"Using a model alias. Got Request for {model}, sending requests to {self.model_group_alias.get(model)}"
             )
             model = self.model_group_alias[model]
+
+        if model not in self.model_names and self.default_deployment is not None:
+            updated_deployment = copy.deepcopy(
+                self.default_deployment
+            )  # self.default_deployment
+            updated_deployment["litellm_params"]["model"] = model
+            return updated_deployment
 
         ## get healthy deployments
         ### get all deployments

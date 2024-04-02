@@ -302,9 +302,7 @@ disable_spend_logs = False
 jwt_handler = JWTHandler()
 prompt_injection_detection_obj: Optional[_OPTIONAL_PromptInjectionDetection] = None
 ### INITIALIZE GLOBAL LOGGING OBJECT ###
-proxy_logging_obj = ProxyLogging(
-    user_api_key_cache=user_api_key_cache, redis_usage_cache=redis_usage_cache
-)
+proxy_logging_obj = ProxyLogging(user_api_key_cache=user_api_key_cache)
 ### REDIS QUEUE ###
 async_result = None
 celery_app_conn = None
@@ -387,12 +385,6 @@ async def user_api_key_auth(
                         raise Exception(
                             f"Admin not allowed to access this route. Route={route}, Allowed Routes={actual_routes}"
                         )
-                # check if team in scopes
-                is_team = jwt_handler.is_team(scopes=scopes)
-                if is_team == False:
-                    raise Exception(
-                        f"Missing both Admin and Team scopes from token. Either is required. Admin Scope={jwt_handler.litellm_jwtauth.admin_jwt_scope}, Team Scope={jwt_handler.litellm_jwtauth.team_jwt_scope}"
-                    )
                 # get team id
                 team_id = jwt_handler.get_team_id(token=valid_token, default_value=None)
 
@@ -1700,6 +1692,7 @@ async def update_cache(
                 # if user does not exist in LiteLLM_UserTable, create a new user
                 existing_spend = 0
                 max_user_budget = None
+                max_end_user_budget = None
                 if litellm.max_end_user_budget is not None:
                     max_end_user_budget = litellm.max_end_user_budget
                 existing_spend_obj = LiteLLM_EndUserTable(
@@ -1908,6 +1901,19 @@ class ProxyConfig:
                 team_config[k] = litellm.get_secret(v)
         return team_config
 
+    def _init_cache(
+        self,
+        cache_params: dict,
+    ):
+        global redis_usage_cache
+        from litellm import Cache
+
+        litellm.cache = Cache(**cache_params)
+
+        if litellm.cache is not None and isinstance(litellm.cache.cache, RedisCache):
+            ## INIT PROXY REDIS USAGE CLIENT ##
+            redis_usage_cache = litellm.cache.cache
+
     async def load_config(
         self, router: Optional[litellm.Router], config_file_path: str
     ):
@@ -2001,17 +2007,11 @@ class ProxyConfig:
                             cache_params[key] = litellm.get_secret(value)
 
                     ## to pass a complete url, or set ssl=True, etc. just set it as `os.environ[REDIS_URL] = <your-redis-url>`, _redis.py checks for REDIS specific environment variables
-
-                    litellm.cache = Cache(**cache_params)
-
-                    if litellm.cache is not None and isinstance(
-                        litellm.cache.cache, RedisCache
-                    ):
-                        ## INIT PROXY REDIS USAGE CLIENT ##
-                        redis_usage_cache = litellm.cache.cache
-                    print(  # noqa
-                        f"{blue_color_code}Set Cache on LiteLLM Proxy: {vars(litellm.cache.cache)}{reset_color_code}"
-                    )
+                    self._init_cache(cache_params=cache_params)
+                    if litellm.cache is not None:
+                        print(  # noqa
+                            f"{blue_color_code}Set Cache on LiteLLM Proxy: {vars(litellm.cache.cache)}{reset_color_code}"
+                        )
                 elif key == "cache" and value == False:
                     pass
                 elif key == "callbacks":
@@ -2243,6 +2243,7 @@ class ProxyConfig:
             proxy_logging_obj.update_values(
                 alerting=general_settings.get("alerting", None),
                 alerting_threshold=general_settings.get("alerting_threshold", 600),
+                redis_cache=redis_usage_cache,
             )
             ### CONNECT TO DATABASE ###
             database_url = general_settings.get("database_url", None)
@@ -3099,6 +3100,12 @@ async def completion(
             response = await llm_router.atext_completion(
                 **data, specific_deployment=True
             )
+        elif (
+            llm_router is not None
+            and data["model"] not in router_model_names
+            and llm_router.default_deployment is not None
+        ):  # model in router deployments, calling a specific deployment on the router
+            response = await llm_router.atext_completion(**data)
         elif user_model is not None:  # `litellm --model <your-model-name>`
             response = await litellm.atext_completion(**data)
         else:
@@ -3316,6 +3323,12 @@ async def chat_completion(
             llm_router is not None and data["model"] in llm_router.deployment_names
         ):  # model in router deployments, calling a specific deployment on the router
             tasks.append(llm_router.acompletion(**data, specific_deployment=True))
+        elif (
+            llm_router is not None
+            and data["model"] not in router_model_names
+            and llm_router.default_deployment is not None
+        ):  # model in router deployments, calling a specific deployment on the router
+            tasks.append(llm_router.acompletion(**data))
         elif user_model is not None:  # `litellm --model <your-model-name>`
             tasks.append(litellm.acompletion(**data))
         else:
@@ -3530,6 +3543,12 @@ async def embeddings(
             llm_router is not None and data["model"] in llm_router.deployment_names
         ):  # model in router deployments, calling a specific deployment on the router
             response = await llm_router.aembedding(**data, specific_deployment=True)
+        elif (
+            llm_router is not None
+            and data["model"] not in router_model_names
+            and llm_router.default_deployment is not None
+        ):  # model in router deployments, calling a specific deployment on the router
+            response = await llm_router.aembedding(**data)
         elif user_model is not None:  # `litellm --model <your-model-name>`
             response = await litellm.aembedding(**data)
         else:
@@ -3675,6 +3694,12 @@ async def image_generation(
             response = await llm_router.aimage_generation(
                 **data
             )  # ensure this goes the llm_router, router will do the correct alias mapping
+        elif (
+            llm_router is not None
+            and data["model"] not in router_model_names
+            and llm_router.default_deployment is not None
+        ):  # model in router deployments, calling a specific deployment on the router
+            response = await llm_router.aimage_generation(**data)
         elif user_model is not None:  # `litellm --model <your-model-name>`
             response = await litellm.aimage_generation(**data)
         else:
@@ -3829,6 +3854,12 @@ async def audio_transcriptions(
                     response = await llm_router.atranscription(
                         **data
                     )  # ensure this goes the llm_router, router will do the correct alias mapping
+                elif (
+                    llm_router is not None
+                    and data["model"] not in router_model_names
+                    and llm_router.default_deployment is not None
+                ):  # model in router deployments, calling a specific deployment on the router
+                    response = await llm_router.atranscription(**data)
                 elif user_model is not None:  # `litellm --model <your-model-name>`
                     response = await litellm.atranscription(**data)
                 else:
@@ -3982,6 +4013,12 @@ async def moderations(
             response = await llm_router.amoderation(
                 **data
             )  # ensure this goes the llm_router, router will do the correct alias mapping
+        elif (
+            llm_router is not None
+            and data["model"] not in router_model_names
+            and llm_router.default_deployment is not None
+        ):  # model in router deployments, calling a specific deployment on the router
+            response = await llm_router.amoderation(**data)
         elif user_model is not None:  # `litellm --model <your-model-name>`
             response = await litellm.amoderation(**data)
         else:
@@ -4968,31 +5005,13 @@ async def global_spend():
 
     if prisma_client is None:
         raise HTTPException(status_code=500, detail={"error": "No db connected"})
-    sql_query = f"""
-        SELECT SUM(spend) AS total_spend
-        FROM "LiteLLM_VerificationToken";
-        ;
-    """
+    sql_query = """SELECT SUM(spend) as total_spend FROM "MonthlyGlobalSpend";"""
     response = await prisma_client.db.query_raw(query=sql_query)
     if response is not None:
         if isinstance(response, list) and len(response) > 0:
             total_spend = response[0].get("total_spend", 0.0)
 
-    sql_query = f"""
-        SELECT 
-            *
-        FROM 
-            "LiteLLM_UserTable"
-        WHERE 
-            user_id = 'litellm-proxy-budget';
-    """
-    user_response = await prisma_client.db.query_raw(query=sql_query)
-
-    if user_response is not None:
-        if isinstance(user_response, list) and len(user_response) > 0:
-            total_proxy_budget = user_response[0].get("max_budget", 0.0)
-
-    return {"spend": total_spend, "max_budget": total_proxy_budget}
+    return {"spend": total_spend, "max_budget": litellm.max_budget}
 
 
 @router.get(
@@ -8058,6 +8077,41 @@ async def cache_ping():
         raise HTTPException(
             status_code=503,
             detail=f"Service Unhealthy ({str(e)}).Cache parameters: {litellm_cache_params}.specific_cache_params: {specific_cache_params}",
+        )
+
+
+@router.get(
+    "/cache/redis/info",
+    tags=["caching"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def cache_redis_info():
+    """
+    Endpoint for getting /redis/info
+    """
+    try:
+        if litellm.cache is None:
+            raise HTTPException(
+                status_code=503, detail="Cache not initialized. litellm.cache is None"
+            )
+        if litellm.cache.type == "redis":
+            client_list = litellm.cache.cache.client_list()
+            redis_info = litellm.cache.cache.info()
+            num_clients = len(client_list)
+            return {
+                "num_clients": num_clients,
+                "clients": client_list,
+                "info": redis_info,
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Cache type {litellm.cache.type} does not support flushing",
+            )
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Service Unhealthy ({str(e)})",
         )
 
 

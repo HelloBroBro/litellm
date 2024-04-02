@@ -12,7 +12,6 @@ from typing import Any, Literal, Union, BinaryIO
 from functools import partial
 import dotenv, traceback, random, asyncio, time, contextvars
 from copy import deepcopy
-
 import httpx
 import litellm
 from ._logging import verbose_logger
@@ -3554,6 +3553,7 @@ def transcription(
     api_key: Optional[str] = None,
     api_base: Optional[str] = None,
     api_version: Optional[str] = None,
+    max_retries: Optional[int] = None,
     litellm_logging_obj=None,
     custom_llm_provider=None,
     **kwargs,
@@ -3569,6 +3569,8 @@ def transcription(
     proxy_server_request = kwargs.get("proxy_server_request", None)
     model_info = kwargs.get("model_info", None)
     metadata = kwargs.get("metadata", {})
+    if max_retries is None:
+        max_retries = openai.DEFAULT_MAX_RETRIES
 
     model_response = litellm.utils.TranscriptionResponse()
 
@@ -3612,6 +3614,7 @@ def transcription(
             api_key=api_key,
             api_version=api_version,
             azure_ad_token=azure_ad_token,
+            max_retries=max_retries,
         )
     elif custom_llm_provider == "openai":
         response = openai_chat_completions.audio_transcriptions(
@@ -3622,6 +3625,7 @@ def transcription(
             atranscription=atranscription,
             timeout=timeout,
             logging_obj=litellm_logging_obj,
+            max_retries=max_retries,
         )
     return response
 
