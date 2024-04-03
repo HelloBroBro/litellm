@@ -120,11 +120,15 @@ const Team: React.FC<TeamProps> = ({
                     placeholder="Select models"
                     style={{ width: "100%" }}
                   >
+                    <Select2.Option key="all-proxy-models" value="all-proxy-models">
+                        {"All Proxy Models"}
+                      </Select2.Option>
                     {userModels && userModels.map((model) => (
                       <Select2.Option key={model} value={model}>
                         {model}
                       </Select2.Option>
                     ))}
+                    
                   </Select2>
                 </Form.Item>
                 <Form.Item label="Max Budget (USD)" name="max_budget">
@@ -216,15 +220,7 @@ const handleEditSubmit = async (formValues: Record<string, any>) => {
     setIsDeleteModalOpen(true);
   };
 
-  const handleModelSelection = (selectedModels: string[]) => {
-    if (selectedModels.includes("all_models")) {
-      // Select all models except "All Models"
-      const allModelsExceptAll = userModels.filter(model => model !== "all");
-      form.setFieldsValue({
-        models: allModelsExceptAll
-      });
-    }
-  };
+
   
 
   const confirmDelete = async () => {
@@ -361,23 +357,30 @@ const handleEditSubmit = async (formValues: Record<string, any>) => {
                         <TableCell style={{ maxWidth: "4px", whiteSpace: "pre-wrap", overflow: "hidden"  }}>
                           {team["max_budget"] ? team["max_budget"] : "No limit"}
                         </TableCell>
-                          <TableCell style={{ maxWidth: "8-x", whiteSpace: "pre-wrap", overflow: "hidden" }}>
-                            {Array.isArray(team.models) ? (
-                              <div style={{ display: "flex", flexDirection: "column" }}>
-                                {team.models.length === 0 ? (
-                                  <Badge size={"xs"} className="mb-1" color="purple">
-                                    <Text>All Models</Text>
-                                  </Badge>
-                                ) : (
-                                  team.models.map((model: string, index: number) => (
+                        <TableCell style={{ maxWidth: "8-x", whiteSpace: "pre-wrap", overflow: "hidden" }}>
+                          {Array.isArray(team.models) ? (
+                            <div style={{ display: "flex", flexDirection: "column" }}>
+                              {team.models.length === 0 ? (
+                                <Badge size={"xs"} className="mb-1" color="red">
+                                  <Text>All Proxy Models</Text>
+                                </Badge>
+                              ) : (
+                                team.models.map((model: string, index: number) => (
+                                  model === "all-proxy-models" ? (
+                                    <Badge key={index} size={"xs"} className="mb-1" color="red">
+                                      <Text>All Proxy Models</Text>
+                                    </Badge>
+                                  ) : (
                                     <Badge key={index} size={"xs"} className="mb-1" color="blue">
                                       <Text>{model.length > 30 ? `${model.slice(0, 30)}...` : model}</Text>
                                     </Badge>
-                                  ))
-                                )}
-                              </div>
-                            ) : null}
+                                  )
+                                ))
+                              )}
+                            </div>
+                          ) : null}
                         </TableCell>
+
                         <TableCell style={{ maxWidth: "4px", whiteSpace: "pre-wrap", overflow: "hidden"  }}>
                           <Text>
                             TPM:{" "}
@@ -484,10 +487,9 @@ const handleEditSubmit = async (formValues: Record<string, any>) => {
                     mode="multiple"
                     placeholder="Select models"
                     style={{ width: "100%" }}
-                    onChange={(selectedModels) => handleModelSelection(selectedModels)}
                   >
-                    <Select2.Option key="all_models" value="all_models">
-                      All Models
+                    <Select2.Option key="all-proxy-models" value="all-proxy-models">
+                      All Proxy Models
                     </Select2.Option>
                     {userModels.map((model) => (
                       <Select2.Option key={model} value={model}>

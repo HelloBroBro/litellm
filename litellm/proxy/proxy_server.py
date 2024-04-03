@@ -637,6 +637,13 @@ async def user_api_key_auth(
                 len(valid_token.models) == 0
             ):  # assume an empty model list means all models are allowed to be called
                 pass
+            elif (
+                isinstance(valid_token.models, list)
+                and "all-team-models" in valid_token.models
+            ):
+                # Do not do any validation at this step
+                # the validation will occur when checking the team has access to this model
+                pass
             else:
                 try:
                     data = await request.json()
@@ -1462,8 +1469,8 @@ async def update_database(
 
                 payload["spend"] = response_cost
                 if (
-                    os.getenv("SPEND_LOGS_URL", None) is not None
-                    and prisma_client is not None
+                    prisma_client is not None
+                    and os.getenv("SPEND_LOGS_URL", None) is not None
                 ):
                     if isinstance(payload["startTime"], datetime):
                         payload["startTime"] = payload["startTime"].isoformat()
@@ -1471,7 +1478,7 @@ async def update_database(
                         payload["endTime"] = payload["endTime"].isoformat()
                     prisma_client.spend_log_transactons.append(payload)
                 elif prisma_client is not None:
-                    await prisma_client.insert_data(data=payload, table_name="spend")
+                    prisma_client.spend_log_transactions.append(payload)
             except Exception as e:
                 verbose_proxy_logger.debug(
                     f"Update Spend Logs DB failed to execute - {str(e)}\n{traceback.format_exc()}"
@@ -1907,6 +1914,12 @@ class ProxyConfig:
     ):
         global redis_usage_cache
         from litellm import Cache
+
+        if "default_in_memory_ttl" in cache_params:
+            litellm.default_in_memory_ttl = cache_params["default_in_memory_ttl"]
+
+        if "default_redis_ttl" in cache_params:
+            litellm.default_redis_ttl = cache_params["default_in_redis_ttl"]
 
         litellm.cache = Cache(**cache_params)
 
@@ -2550,7 +2563,10 @@ async def generate_key_helper_fn(
 
             ## CREATE KEY
             verbose_proxy_logger.debug("prisma_client: Creating Key= %s", key_data)
-            await prisma_client.insert_data(data=key_data, table_name="key")
+            create_key_response = await prisma_client.insert_data(
+                data=key_data, table_name="key"
+            )
+            key_data["token_id"] = getattr(create_key_response, "token", None)
         elif custom_db_client is not None:
             if table_name is None or table_name == "user":
                 ## CREATE USER (If necessary)
@@ -2954,7 +2970,7 @@ async def startup_event():
             update_spend,
             "interval",
             seconds=batch_writing_interval,
-            args=[prisma_client, db_writer_client],
+            args=[prisma_client, db_writer_client, proxy_logging_obj],
         )
         scheduler.start()
 
@@ -5063,7 +5079,7 @@ async def global_spend_per_tea():
             SUM(s.spend) AS total_spend
         FROM
             "LiteLLM_SpendLogs" s
-        JOIN
+        LEFT JOIN
             "LiteLLM_TeamTable" t ON s.team_id = t.team_id
         WHERE
             s."startTime" >= CURRENT_DATE - INTERVAL '30 days'
@@ -5084,6 +5100,8 @@ async def global_spend_per_tea():
         if row_date is None:
             continue
         team_alias = row["team_alias"]
+        if team_alias is None:
+            team_alias = "Unassigned"
         team_aliases.add(team_alias)
         if row_date in spend_by_date:
             # get the team_id for this entry
@@ -5109,6 +5127,8 @@ async def global_spend_per_tea():
         # only add first 10 elements to total_spend_per_team_ui
         if len(total_spend_per_team_ui) >= 10:
             break
+        if team_id is None:
+            team_id = "Unassigned"
         total_spend_per_team_ui.append(
             {"team_id": team_id, "total_spend": total_spend_per_team[team_id]}
         )
