@@ -91,6 +91,16 @@ class LiteLLMRoutes(enum.Enum):
         "/model/info",
     ]
 
+    public_routes: List = [
+        "/routes",
+        "/",
+        "/health/liveliness",
+        "/health/readiness",
+        "/test",
+        "/config/yaml",
+        "/metrics",
+    ]
+
 
 class LiteLLM_JWTAuth(LiteLLMBase):
     """
