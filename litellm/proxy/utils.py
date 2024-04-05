@@ -13,6 +13,7 @@ from litellm.proxy._types import (
     Member,
 )
 from litellm.caching import DualCache, RedisCache
+from litellm.router import Deployment, ModelInfo, LiteLLM_Params
 from litellm.llms.custom_httpx.httpx_handler import HTTPHandler
 from litellm.proxy.hooks.parallel_request_limiter import (
     _PROXY_MaxParallelRequestsHandler,
@@ -2316,6 +2317,45 @@ def _is_user_proxy_admin(user_id_information=None):
         return True
 
     return False
+
+
+def encrypt_value(value: str, master_key: str):
+    import hashlib
+    import nacl.secret
+    import nacl.utils
+
+    # get 32 byte master key #
+    hash_object = hashlib.sha256(master_key.encode())
+    hash_bytes = hash_object.digest()
+
+    # initialize secret box #
+    box = nacl.secret.SecretBox(hash_bytes)
+
+    # encode message #
+    value_bytes = value.encode("utf-8")
+
+    encrypted = box.encrypt(value_bytes)
+
+    return encrypted
+
+
+def decrypt_value(value: bytes, master_key: str) -> str:
+    import hashlib
+    import nacl.secret
+    import nacl.utils
+
+    # get 32 byte master key #
+    hash_object = hashlib.sha256(master_key.encode())
+    hash_bytes = hash_object.digest()
+
+    # initialize secret box #
+    box = nacl.secret.SecretBox(hash_bytes)
+
+    # Convert the bytes object to a string
+    plaintext = box.decrypt(value)
+
+    plaintext = plaintext.decode("utf-8")  # type: ignore
+    return plaintext  # type: ignore
 
 
 # LiteLLM Admin UI - Non SSO Login
