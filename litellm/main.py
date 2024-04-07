@@ -12,6 +12,7 @@ from typing import Any, Literal, Union, BinaryIO
 from functools import partial
 import dotenv, traceback, random, asyncio, time, contextvars
 from copy import deepcopy
+
 import httpx
 import litellm
 from ._logging import verbose_logger
@@ -1059,6 +1060,7 @@ def completion(
                 api_key=api_key,
                 api_base=api_base,
                 acompletion=acompletion,
+                client=client,  # pass AsyncOpenAI, OpenAI client
                 logging_obj=logging,
                 optional_params=optional_params,
                 litellm_params=litellm_params,

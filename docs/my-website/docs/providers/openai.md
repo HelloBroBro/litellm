@@ -44,7 +44,11 @@ export OPENAI_API_KEY=""
 model_list:
   - model_name: gpt-3.5-turbo
     litellm_params:
-      model: gpt-3.5-turbo
+      model: openai/gpt-3.5-turbo                          # The `openai/` prefix will call openai.chat.completions.create
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: gpt-3.5-turbo-instruct
+    litellm_params:
+      model: text-completion-openai/gpt-3.5-turbo-instruct # The `text-completion-openai/` prefix will call openai.completions.create
       api_key: os.environ/OPENAI_API_KEY
 ```
 </TabItem>
@@ -218,7 +222,7 @@ response = completion(
 | Model Name          | Function Call                                      |
 |---------------------|----------------------------------------------------|
 | gpt-3.5-turbo-instruct | `response = completion(model="gpt-3.5-turbo-instruct", messages=messages)` |
-| gpt-3.5-turbo-instruct-0914 | `response = completion(model="gpt-3.5-turbo-instruct-091", messages=messages)` |
+| gpt-3.5-turbo-instruct-0914 | `response = completion(model="gpt-3.5-turbo-instruct-0914", messages=messages)` |
 | text-davinci-003    | `response = completion(model="text-davinci-003", messages=messages)` |
 | ada-001             | `response = completion(model="ada-001", messages=messages)` |
 | curie-001           | `response = completion(model="curie-001", messages=messages)` |

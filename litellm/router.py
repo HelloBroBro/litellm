@@ -29,117 +29,7 @@ from litellm.utils import ModelResponse, CustomStreamWrapper
 import copy
 from litellm._logging import verbose_router_logger
 import logging
-from pydantic import BaseModel, validator
-
-
-class ModelInfo(BaseModel):
-    id: Optional[
-        str
-    ]  # Allow id to be optional on input, but it will always be present as a str in the model instance
-
-    def __init__(self, id: Optional[Union[str, int]] = None, **params):
-        if id is None:
-            id = str(uuid.uuid4())  # Generate a UUID if id is None or not provided
-        elif isinstance(id, int):
-            id = str(id)
-        super().__init__(id=id, **params)
-
-    class Config:
-        extra = "allow"
-
-    def __contains__(self, key):
-        # Define custom behavior for the 'in' operator
-        return hasattr(self, key)
-
-    def get(self, key, default=None):
-        # Custom .get() method to access attributes with a default value if the attribute doesn't exist
-        return getattr(self, key, default)
-
-    def __getitem__(self, key):
-        # Allow dictionary-style access to attributes
-        return getattr(self, key)
-
-    def __setitem__(self, key, value):
-        # Allow dictionary-style assignment of attributes
-        setattr(self, key, value)
-
-
-class LiteLLM_Params(BaseModel):
-    model: str
-    tpm: Optional[int] = None
-    rpm: Optional[int] = None
-    api_key: Optional[str] = None
-    api_base: Optional[str] = None
-    api_version: Optional[str] = None
-    timeout: Optional[Union[float, str]] = None  # if str, pass in as os.environ/
-    stream_timeout: Optional[Union[float, str]] = (
-        None  # timeout when making stream=True calls, if str, pass in as os.environ/
-    )
-    max_retries: int = 2  # follows openai default of 2
-    organization: Optional[str] = None  # for openai orgs
-
-    def __init__(self, max_retries: Optional[Union[int, str]] = None, **params):
-        if max_retries is None:
-            max_retries = 2
-        elif isinstance(max_retries, str):
-            max_retries = int(max_retries)  # cast to int
-        super().__init__(max_retries=max_retries, **params)
-
-    class Config:
-        extra = "allow"
-
-    def __contains__(self, key):
-        # Define custom behavior for the 'in' operator
-        return hasattr(self, key)
-
-    def get(self, key, default=None):
-        # Custom .get() method to access attributes with a default value if the attribute doesn't exist
-        return getattr(self, key, default)
-
-    def __getitem__(self, key):
-        # Allow dictionary-style access to attributes
-        return getattr(self, key)
-
-    def __setitem__(self, key, value):
-        # Allow dictionary-style assignment of attributes
-        setattr(self, key, value)
-
-
-class Deployment(BaseModel):
-    model_name: str
-    litellm_params: LiteLLM_Params
-    model_info: ModelInfo
-
-    def __init__(self, model_info: Optional[ModelInfo] = None, **params):
-        if model_info is None:
-            model_info = ModelInfo()
-        super().__init__(model_info=model_info, **params)
-
-    def to_json(self, **kwargs):
-        try:
-            return self.model_dump(**kwargs)  # noqa
-        except Exception as e:
-            # if using pydantic v1
-            return self.dict(**kwargs)
-
-    class Config:
-        extra = "allow"
-
-    def __contains__(self, key):
-        # Define custom behavior for the 'in' operator
-        return hasattr(self, key)
-
-    def get(self, key, default=None):
-        # Custom .get() method to access attributes with a default value if the attribute doesn't exist
-        return getattr(self, key, default)
-
-    def __getitem__(self, key):
-        # Allow dictionary-style access to attributes
-        return getattr(self, key)
-
-    def __setitem__(self, key, value):
-        # Allow dictionary-style assignment of attributes
-        setattr(self, key, value)
+from litellm.types.router import Deployment, ModelInfo, LiteLLM_Params
 
 
 class Router:
@@ -522,9 +412,9 @@ class Router:
                 messages=messages,
                 specific_deployment=kwargs.pop("specific_deployment", None),
             )
-            if self.set_verbose == True and self.debug_level == "DEBUG":
-                # debug how often this deployment picked
-                self._print_deployment_metrics(deployment=deployment)
+
+            # debug how often this deployment picked
+            self._track_deployment_metrics(deployment=deployment)
 
             kwargs.setdefault("metadata", {}).update(
                 {
@@ -582,9 +472,9 @@ class Router:
             verbose_router_logger.info(
                 f"litellm.acompletion(model={model_name})\033[32m 200 OK\033[0m"
             )
-            if self.set_verbose == True and self.debug_level == "DEBUG":
-                # debug how often this deployment picked
-                self._print_deployment_metrics(deployment=deployment, response=response)
+            # debug how often this deployment picked
+            self._track_deployment_metrics(deployment=deployment, response=response)
+
             return response
         except Exception as e:
             verbose_router_logger.info(
@@ -1683,6 +1573,24 @@ class Router:
         except Exception as e:
             raise e
 
+    def _update_usage(self, deployment_id: str):
+        """
+        Update deployment rpm for that minute
+        """
+        rpm_key = deployment_id
+
+        request_count = self.cache.get_cache(key=rpm_key, local_only=True)
+        if request_count is None:
+            request_count = 1
+            self.cache.set_cache(
+                key=rpm_key, value=request_count, local_only=True, ttl=60
+            )  # only store for 60s
+        else:
+            request_count += 1
+            self.cache.set_cache(
+                key=rpm_key, value=request_count, local_only=True
+            )  # don't change existing ttl
+
     def _set_cooldown_deployments(self, deployment: Optional[str] = None):
         """
         Add a model to the list of models being cooled down for that minute, if it exceeds the allowed fails / minute
@@ -1767,8 +1675,10 @@ class Router:
             model_name in litellm.open_ai_chat_completion_models
             or custom_llm_provider in litellm.openai_compatible_providers
             or custom_llm_provider == "azure"
+            or custom_llm_provider == "azure_text"
             or custom_llm_provider == "custom_openai"
             or custom_llm_provider == "openai"
+            or custom_llm_provider == "text-completion-openai"
             or "ft:gpt-3.5-turbo" in model_name
             or model_name in litellm.open_ai_embedding_models
         ):
@@ -2263,6 +2173,13 @@ class Router:
         self.model_names.append(deployment.model_name)
         return
 
+    def get_deployment(self, model_id: str):
+        for model in self.model_list:
+            if "model_info" in model and "id" in model["model_info"]:
+                if model_id == model["model_info"]["id"]:
+                    return model
+        return None
+
     def get_model_ids(self):
         ids = []
         for model in self.model_list:
@@ -2358,6 +2275,15 @@ class Router:
         except Exception as e:
             return _returned_deployments
 
+        _context_window_error = False
+        _rate_limit_error = False
+
+        ## get model group RPM ##
+        current_minute = datetime.now().strftime("%H-%M")
+        rpm_key = f"{model}:rpm:{current_minute}"
+        model_group_cache = (
+            self.cache.get_cache(key=rpm_key, local_only=True) or {}
+        )  # check the redis + in-memory cache used by lowest_latency and usage-based routing. Only check the local cache.
         for idx, deployment in enumerate(_returned_deployments):
             # see if we have the info for this model
             try:
@@ -2382,19 +2308,56 @@ class Router:
                     and input_tokens > model_info["max_input_tokens"]
                 ):
                     invalid_model_indices.append(idx)
+                    _context_window_error = True
+                    continue
+
+            ## RPM CHECK ##
+            _litellm_params = deployment.get("litellm_params", {})
+            model_id = deployment.get("model_info", {}).get("id", "")
+            ### get local router cache ###
+            current_request_cache_local = (
+                self.cache.get_cache(key=model_id, local_only=True) or 0
+            )
+            ### get usage based cache ###
+            model_group_cache[model_id] = model_group_cache.get(model_id, 0)
+
+            current_request = max(
+                current_request_cache_local, model_group_cache[model_id]
+            )
+
+            if (
+                isinstance(_litellm_params, dict)
+                and _litellm_params.get("rpm", None) is not None
+            ):
+                if (
+                    isinstance(_litellm_params["rpm"], int)
+                    and _litellm_params["rpm"] <= current_request
+                ):
+                    invalid_model_indices.append(idx)
+                    _rate_limit_error = True
+                    continue
 
         if len(invalid_model_indices) == len(_returned_deployments):
             """
-            - no healthy deployments available b/c context window checks
+            - no healthy deployments available b/c context window checks or rate limit error
+
+            - First check for rate limit errors (if this is true, it means the model passed the context window check but failed the rate limit check)
             """
-            raise litellm.ContextWindowExceededError(
-                message="Context Window exceeded for given call",
-                model=model,
-                llm_provider="",
-                response=httpx.Response(
-                    status_code=400, request=httpx.Request("GET", "https://example.com")
-                ),
-            )
+
+            if _rate_limit_error == True:  # allow generic fallback logic to take place
+                raise ValueError(
+                    f"No deployments available for selected model, passed model={model}"
+                )
+            elif _context_window_error == True:
+                raise litellm.ContextWindowExceededError(
+                    message="Context Window exceeded for given call",
+                    model=model,
+                    llm_provider="",
+                    response=httpx.Response(
+                        status_code=400,
+                        request=httpx.Request("GET", "https://example.com"),
+                    ),
+                )
         if len(invalid_model_indices) > 0:
             for idx in reversed(invalid_model_indices):
                 _returned_deployments.pop(idx)
@@ -2557,7 +2520,7 @@ class Router:
         )
         return deployment
 
-    def _print_deployment_metrics(self, deployment, response=None):
+    def _track_deployment_metrics(self, deployment, response=None):
         try:
             litellm_params = deployment["litellm_params"]
             api_base = litellm_params.get("api_base", "")
@@ -2568,6 +2531,7 @@ class Router:
 
                 # update self.deployment_stats
                 if model_id is not None:
+                    self._update_usage(model_id)  # update in-memory cache for tracking
                     if model_id in self.deployment_stats:
                         # only update num_requests
                         self.deployment_stats[model_id]["num_requests"] += 1
@@ -2604,15 +2568,18 @@ class Router:
                             "num_successes": 1,
                             "avg_latency": response_ms,
                         }
-            from pprint import pformat
+            if self.set_verbose == True and self.debug_level == "DEBUG":
+                from pprint import pformat
 
-            # Assuming self.deployment_stats is your dictionary
-            formatted_stats = pformat(self.deployment_stats)
+                # Assuming self.deployment_stats is your dictionary
+                formatted_stats = pformat(self.deployment_stats)
 
-            # Assuming verbose_router_logger is your logger
-            verbose_router_logger.info("self.deployment_stats: \n%s", formatted_stats)
+                # Assuming verbose_router_logger is your logger
+                verbose_router_logger.info(
+                    "self.deployment_stats: \n%s", formatted_stats
+                )
         except Exception as e:
-            verbose_router_logger.error(f"Error in _print_deployment_metrics: {str(e)}")
+            verbose_router_logger.error(f"Error in _track_deployment_metrics: {str(e)}")
 
     def flush_cache(self):
         litellm.cache = None
