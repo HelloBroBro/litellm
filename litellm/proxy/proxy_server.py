@@ -1283,6 +1283,20 @@ async def _PROXY_track_cost_callback(
         verbose_proxy_logger.debug("error in tracking cost callback - %s", e)
 
 
+def _set_spend_logs_payload(
+    payload: dict, prisma_client: PrismaClient, spend_logs_url: Optional[str] = None
+):
+    if prisma_client is not None and spend_logs_url is not None:
+        if isinstance(payload["startTime"], datetime):
+            payload["startTime"] = payload["startTime"].isoformat()
+        if isinstance(payload["endTime"], datetime):
+            payload["endTime"] = payload["endTime"].isoformat()
+        prisma_client.spend_log_transactions.append(payload)
+    elif prisma_client is not None:
+        prisma_client.spend_log_transactions.append(payload)
+    return prisma_client
+
+
 async def update_database(
     token,
     response_cost,
@@ -1295,6 +1309,7 @@ async def update_database(
     end_time=None,
 ):
     try:
+        global prisma_client
         verbose_proxy_logger.info(
             f"Enters prisma db call, response_cost: {response_cost}, token: {token}; user_id: {user_id}; team_id: {team_id}"
         )
@@ -1453,26 +1468,22 @@ async def update_database(
         ### UPDATE SPEND LOGS ###
         async def _insert_spend_log_to_db():
             try:
-                # Helper to generate payload to log
-                payload = get_logging_payload(
-                    kwargs=kwargs,
-                    response_obj=completion_response,
-                    start_time=start_time,
-                    end_time=end_time,
-                )
+                global prisma_client
+                if prisma_client is not None:
+                    # Helper to generate payload to log
+                    payload = get_logging_payload(
+                        kwargs=kwargs,
+                        response_obj=completion_response,
+                        start_time=start_time,
+                        end_time=end_time,
+                    )
 
-                payload["spend"] = response_cost
-                if (
-                    prisma_client is not None
-                    and os.getenv("SPEND_LOGS_URL", None) is not None
-                ):
-                    if isinstance(payload["startTime"], datetime):
-                        payload["startTime"] = payload["startTime"].isoformat()
-                    if isinstance(payload["endTime"], datetime):
-                        payload["endTime"] = payload["endTime"].isoformat()
-                    prisma_client.spend_log_transactons.append(payload)
-                elif prisma_client is not None:
-                    prisma_client.spend_log_transactions.append(payload)
+                    payload["spend"] = response_cost
+                    prisma_client = _set_spend_logs_payload(
+                        payload=payload,
+                        spend_logs_url=os.getenv("SPEND_LOGS_URL"),
+                        prisma_client=prisma_client,
+                    )
             except Exception as e:
                 verbose_proxy_logger.debug(
                     f"Update Spend Logs DB failed to execute - {str(e)}\n{traceback.format_exc()}"
@@ -1835,26 +1846,8 @@ class ProxyConfig:
         return config
 
     async def save_config(self, new_config: dict):
-        global prisma_client, llm_router, user_config_file_path, llm_model_list, general_settings
+        global prisma_client, general_settings, user_config_file_path
         # Load existing config
-        backup_config = await self.get_config()
-
-        # update Router - verifies if this is a valid config
-        try:
-            (
-                llm_router,
-                llm_model_list,
-                general_settings,
-            ) = await proxy_config.load_config(
-                router=llm_router, config_file_path=user_config_file_path
-            )
-        except Exception as e:
-            traceback.print_exc()
-            # Revert to old config instead
-            with open(f"{user_config_file_path}", "w") as config_file:
-                yaml.dump(backup_config, config_file, default_flow_style=False)
-            raise HTTPException(status_code=400, detail="Invalid config passed in")
-
         ## DB - writes valid config to db
         """
         - Do not write restricted params like 'api_key' to the database
@@ -2199,6 +2192,18 @@ class ProxyConfig:
                         f"{blue_color_code} setting litellm.{key}={value}{reset_color_code}"
                     )
                     setattr(litellm, key, value)
+                elif key == "upperbound_key_generate_params":
+                    if value is not None and isinstance(value, dict):
+                        for _k, _v in value.items():
+                            if isinstance(_v, str) and _v.startswith("os.environ/"):
+                                value[_k] = litellm.get_secret(_v)
+                        litellm.upperbound_key_generate_params = (
+                            LiteLLM_UpperboundKeyGenerateParams(**value)
+                        )
+                    else:
+                        raise Exception(
+                            f"Invalid value set for upperbound_key_generate_params - value={value}"
+                        )
                 else:
                     verbose_proxy_logger.debug(
                         f"{blue_color_code} setting litellm.{key}={value}{reset_color_code}"
@@ -3000,6 +3005,9 @@ async def startup_event():
 
     ## JWT AUTH ##
     if general_settings.get("litellm_jwtauth", None) is not None:
+        for k, v in general_settings["litellm_jwtauth"].items():
+            if isinstance(v, str) and v.startswith("os.environ/"):
+                general_settings["litellm_jwtauth"][k] = litellm.get_secret(v)
         litellm_jwtauth = LiteLLM_JWTAuth(**general_settings["litellm_jwtauth"])
     else:
         litellm_jwtauth = LiteLLM_JWTAuth()
@@ -4317,7 +4325,11 @@ async def generate_key_fn(
             for elem in data:
                 # if key in litellm.upperbound_key_generate_params, use the min of value and litellm.upperbound_key_generate_params[key]
                 key, value = elem
-                if value is not None and key in litellm.upperbound_key_generate_params:
+                if (
+                    value is not None
+                    and getattr(litellm.upperbound_key_generate_params, key, None)
+                    is not None
+                ):
                     # if value is float/int
                     if key in [
                         "max_budget",
@@ -4325,21 +4337,28 @@ async def generate_key_fn(
                         "tpm_limit",
                         "rpm_limit",
                     ]:
-                        if value > litellm.upperbound_key_generate_params[key]:
-                            # directly compare floats/ints
-                            setattr(
-                                data, key, litellm.upperbound_key_generate_params[key]
+                        if value > getattr(litellm.upperbound_key_generate_params, key):
+                            raise HTTPException(
+                                status_code=400,
+                                detail={
+                                    "error": f"{key} is over max limit set in config - user_value={value}; max_value={getattr(litellm.upperbound_key_generate_params, key)}"
+                                },
                             )
                     elif key == "budget_duration":
                         # budgets are in 1s, 1m, 1h, 1d, 1m (30s, 30m, 30h, 30d, 30m)
                         # compare the duration in seconds and max duration in seconds
                         upperbound_budget_duration = _duration_in_seconds(
-                            duration=litellm.upperbound_key_generate_params[key]
+                            duration=getattr(
+                                litellm.upperbound_key_generate_params, key
+                            )
                         )
                         user_set_budget_duration = _duration_in_seconds(duration=value)
                         if user_set_budget_duration > upperbound_budget_duration:
-                            setattr(
-                                data, key, litellm.upperbound_key_generate_params[key]
+                            raise HTTPException(
+                                status_code=400,
+                                detail={
+                                    "error": f"Budget duration is over max limit set in config - user_value={user_set_budget_duration}; max_value={upperbound_budget_duration}"
+                                },
                             )
 
         # TODO: @ishaan-jaff: Migrate all budget tracking to use LiteLLM_BudgetTable
@@ -6927,7 +6946,7 @@ async def add_new_model(
     model_params: Deployment,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
-    global llm_router, llm_model_list, general_settings, user_config_file_path, proxy_config, prisma_client, master_key, store_model_in_db
+    global llm_router, llm_model_list, general_settings, user_config_file_path, proxy_config, prisma_client, master_key, store_model_in_db, proxy_logging_obj
     try:
         import base64
 
@@ -6966,6 +6985,11 @@ async def add_new_model(
                     "updated_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
                 }
             )
+
+            await proxy_config.add_deployment(
+                prisma_client=prisma_client, proxy_logging_obj=proxy_logging_obj
+            )
+
         else:
             raise HTTPException(
                 status_code=500,
@@ -7904,16 +7928,36 @@ async def auth_callback(request: Request):
                     "user_email": getattr(user_info, "user_id", user_email),
                 }
                 user_role = getattr(user_info, "user_role", None)
-            elif litellm.default_user_params is not None and isinstance(
-                litellm.default_user_params, dict
-            ):
-                user_defined_values = {
-                    "models": litellm.default_user_params.get("models", user_id_models),
-                    "user_id": litellm.default_user_params.get("user_id", user_id),
-                    "user_email": litellm.default_user_params.get(
-                        "user_email", user_email
-                    ),
-                }
+
+            else:
+                ## check if user-email in db ##
+                user_info = await prisma_client.db.litellm_usertable.find_first(
+                    where={"user_email": user_email}
+                )
+                if user_info is not None:
+                    user_defined_values = {
+                        "models": getattr(user_info, "models", user_id_models),
+                        "user_id": getattr(user_info, "user_id", user_id),
+                        "user_email": getattr(user_info, "user_id", user_email),
+                    }
+                    user_role = getattr(user_info, "user_role", None)
+
+                    # update id
+                    await prisma_client.db.litellm_usertable.update_many(
+                        where={"user_email": user_email}, data={"user_id": user_id}  # type: ignore
+                    )
+                elif litellm.default_user_params is not None and isinstance(
+                    litellm.default_user_params, dict
+                ):
+                    user_defined_values = {
+                        "models": litellm.default_user_params.get(
+                            "models", user_id_models
+                        ),
+                        "user_id": litellm.default_user_params.get("user_id", user_id),
+                        "user_email": litellm.default_user_params.get(
+                            "user_email", user_email
+                        ),
+                    }
     except Exception as e:
         pass
 
@@ -7984,8 +8028,6 @@ async def update_config(config_info: ConfigYAML):
 
         # Load existing config
         config = await proxy_config.get_config()
-
-        backup_config = copy.deepcopy(config)
         verbose_proxy_logger.debug("Loaded config: %s", config)
 
         # update the general settings

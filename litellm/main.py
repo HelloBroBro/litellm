@@ -12,7 +12,6 @@ from typing import Any, Literal, Union, BinaryIO
 from functools import partial
 import dotenv, traceback, random, asyncio, time, contextvars
 from copy import deepcopy
-
 import httpx
 import litellm
 from ._logging import verbose_logger
@@ -317,6 +316,14 @@ async def acompletion(
                 response = await init_response
             else:
                 response = init_response  # type: ignore
+
+            if custom_llm_provider == "text-completion-openai" and isinstance(
+                response, TextCompletionResponse
+            ):
+                response = litellm.OpenAITextCompletionConfig().convert_to_chat_model_response_object(
+                    response_object=response,
+                    model_response_object=litellm.ModelResponse(),
+                )
         else:
             # Call the synchronous function using run_in_executor
             response = await loop.run_in_executor(None, func_with_context)  # type: ignore
