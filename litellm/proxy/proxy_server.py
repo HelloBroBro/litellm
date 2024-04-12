@@ -422,12 +422,21 @@ async def user_api_key_auth(
                     user_api_key_cache=user_api_key_cache,
                 )
 
-                # common checks
-                # allow request
-
-                # get the request body
-                request_data = await _read_request_body(request=request)
-
+                # [OPTIONAL] track spend against an internal employee - `LiteLLM_UserTable`
+                user_object = None
+                user_id = jwt_handler.get_user_id(token=valid_token, default_value=None)
+                if user_id is not None:
+                    # get the user object
+                    user_object = await get_user_object(
+                        user_id=user_id,
+                        prisma_client=prisma_client,
+                        user_api_key_cache=user_api_key_cache,
+                    )
+                    # save the user object to cache
+                    await user_api_key_cache.async_set_cache(
+                        key=user_id, value=user_object
+                    )
+                # [OPTIONAL] track spend against an external user - `LiteLLM_EndUserTable`
                 end_user_object = None
                 end_user_id = jwt_handler.get_end_user_id(
                     token=valid_token, default_value=None
@@ -445,7 +454,6 @@ async def user_api_key_auth(
                     )
 
                 global_proxy_spend = None
-
                 if litellm.max_budget > 0:  # user set proxy max budget
                     # check cache
                     global_proxy_spend = await user_api_key_cache.async_get_cache(
@@ -480,16 +488,20 @@ async def user_api_key_auth(
                             )
                         )
 
+                # get the request body
+                request_data = await _read_request_body(request=request)
+
                 # run through common checks
                 _ = common_checks(
                     request_body=request_data,
                     team_object=team_object,
+                    user_object=user_object,
                     end_user_object=end_user_object,
                     general_settings=general_settings,
                     global_proxy_spend=global_proxy_spend,
                     route=route,
                 )
-                # save user object in cache
+                # save team object in cache
                 await user_api_key_cache.async_set_cache(
                     key=team_object.team_id, value=team_object
                 )
@@ -502,6 +514,7 @@ async def user_api_key_auth(
                     team_rpm_limit=team_object.rpm_limit,
                     team_models=team_object.models,
                     user_role="app_owner",
+                    user_id=user_id,
                 )
         #### ELSE ####
         if master_key is None:
@@ -954,6 +967,7 @@ async def user_api_key_auth(
             _ = common_checks(
                 request_body=request_data,
                 team_object=_team_obj,
+                user_object=None,
                 end_user_object=_end_user_object,
                 general_settings=general_settings,
                 global_proxy_spend=global_proxy_spend,
@@ -1328,8 +1342,6 @@ async def update_database(
             existing_token_obj = await user_api_key_cache.async_get_cache(
                 key=hashed_token
             )
-            if existing_token_obj is None:
-                return
             existing_user_obj = await user_api_key_cache.async_get_cache(key=user_id)
             if existing_user_obj is not None and isinstance(existing_user_obj, dict):
                 existing_user_obj = LiteLLM_UserTable(**existing_user_obj)
@@ -1351,7 +1363,9 @@ async def update_database(
                     if end_user_id is not None:
                         prisma_client.end_user_list_transactons[end_user_id] = (
                             response_cost
-                            + prisma_client.user_list_transactons.get(end_user_id, 0)
+                            + prisma_client.end_user_list_transactons.get(
+                                end_user_id, 0
+                            )
                         )
                 elif custom_db_client is not None:
                     for id in user_ids:
@@ -2401,7 +2415,8 @@ class ProxyConfig:
                 new_models = (
                     await prisma_client.db.litellm_proxymodeltable.find_many()
                 )  # get all models in db
-                # verbose_proxy_logger.debug(f"new_models: {new_models}")
+                verbose_proxy_logger.debug(f"len new_models: {len(new_models)}")
+
                 _model_list: list = []
                 for m in new_models:
                     _litellm_params = m.litellm_params
@@ -2443,10 +2458,8 @@ class ProxyConfig:
                     f"llm_router model list: {llm_router.model_list}"
                 )
             else:
-                new_models = await prisma_client.db.litellm_proxymodeltable.find_many(
-                    take=10, order={"updated_at": "desc"}
-                )
-                # verbose_proxy_logger.debug(f"new_models: {new_models}")
+                new_models = await prisma_client.db.litellm_proxymodeltable.find_many()
+                verbose_proxy_logger.debug(f"len new_models: {len(new_models)}")
 
                 for m in new_models:
                     _litellm_params = m.litellm_params
@@ -2493,7 +2506,6 @@ class ProxyConfig:
                 for success_callback in success_callbacks:
                     if success_callback not in litellm.success_callback:
                         litellm.success_callback.append(success_callback)
-                        _added_callback = True
             # we need to set env variables too
             environment_variables = config_data.get("environment_variables", {})
             for k, v in environment_variables.items():
@@ -4451,6 +4463,13 @@ async def update_key_fn(request: Request, data: UpdateKeyRequest):
         response = await prisma_client.update_data(
             token=key, data={**non_default_values, "token": key}
         )
+
+        # Delete - key from cache, since it's been updated!
+        # key updated - a new model could have been added to this key. it should not block requests after this is done
+        user_api_key_cache.delete_cache(key)
+        hashed_token = hash_token(key)
+        user_api_key_cache.delete_cache(hashed_token)
+
         return {"key": key, **response["data"]}
         # update based on remaining passed in values
     except Exception as e:
@@ -7598,6 +7617,33 @@ async def google_login(request: Request):
         return HTMLResponse(content=html_form, status_code=200)
 
 
+@app.get("/fallback/login", tags=["experimental"], include_in_schema=False)
+async def fallback_login(request: Request):
+    """
+    Create Proxy API Keys using Google Workspace SSO. Requires setting PROXY_BASE_URL in .env
+    PROXY_BASE_URL should be the your deployed proxy endpoint, e.g. PROXY_BASE_URL="https://litellm-production-7002.up.railway.app/"
+    Example:
+    """
+    # get url from request
+    redirect_url = os.getenv("PROXY_BASE_URL", str(request.base_url))
+    ui_username = os.getenv("UI_USERNAME")
+    if redirect_url.endswith("/"):
+        redirect_url += "sso/callback"
+    else:
+        redirect_url += "/sso/callback"
+
+    if ui_username is not None:
+        # No Google, Microsoft SSO
+        # Use UI Credentials set in .env
+        from fastapi.responses import HTMLResponse
+
+        return HTMLResponse(content=html_form, status_code=200)
+    else:
+        from fastapi.responses import HTMLResponse
+
+        return HTMLResponse(content=html_form, status_code=200)
+
+
 @router.post(
     "/login", include_in_schema=False
 )  # hidden since this is a helper for UI sso login
@@ -7656,10 +7702,12 @@ async def login(request: Request):
                 **{"user_role": "proxy_admin", "duration": "1hr", "key_max_budget": 5, "models": [], "aliases": {}, "config": {}, "spend": 0, "user_id": key_user_id, "team_id": "litellm-dashboard"}  # type: ignore
             )
         else:
-            response = {
-                "token": "sk-gm",
-                "user_id": "litellm-dashboard",
-            }
+            raise ProxyException(
+                message="No Database connected. Set DATABASE_URL in .env. If set, use `--detailed_debug` to debug issue.",
+                type="auth_error",
+                param="DATABASE_URL",
+                code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
         key = response["token"]  # type: ignore
         litellm_dashboard_ui = os.getenv("PROXY_BASE_URL", "")
         if litellm_dashboard_ui.endswith("/"):
