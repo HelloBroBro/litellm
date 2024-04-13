@@ -13,9 +13,9 @@ import {
   Text,
   Grid,
 } from "@tremor/react";
-import { TabPanel, TabPanels, TabGroup, TabList, Tab, TextInput } from "@tremor/react";
-import { Select, SelectItem } from "@tremor/react";
-import { modelInfoCall, userGetRequesedtModelsCall, modelMetricsCall, modelCreateCall, Model } from "./networking";
+import { TabPanel, TabPanels, TabGroup, TabList, Tab, TextInput, Icon } from "@tremor/react";
+import { Select, SelectItem, MultiSelect, MultiSelectItem } from "@tremor/react";
+import { modelInfoCall, userGetRequesedtModelsCall, modelMetricsCall, modelCreateCall, Model, modelCostMap, modelDeleteCall } from "./networking";
 import { BarChart } from "@tremor/react";
 import {
   Button as Button2,
@@ -34,7 +34,7 @@ import { Badge, BadgeDelta, Button } from "@tremor/react";
 import RequestAccess from "./request_model_access";
 import { Typography } from "antd";
 import TextArea from "antd/es/input/TextArea";
-
+import { InformationCircleIcon, PencilAltIcon, PencilIcon, StatusOnlineIcon, TrashIcon } from "@heroicons/react/outline";
 const { Title: Title2, Link } = Typography;
 
 interface ModelDashboardProps {
@@ -43,6 +43,26 @@ interface ModelDashboardProps {
   userRole: string | null;
   userID: string | null;
 }
+
+//["OpenAI", "Azure OpenAI", "Anthropic", "Gemini (Google AI Studio)", "Amazon Bedrock", "OpenAI-Compatible Endpoints (Groq, Together AI, Mistral AI, etc.)"]
+
+enum Providers {
+  OpenAI = "OpenAI",
+  Azure = "Azure",
+  Anthropic = "Anthropic",
+  Google_AI_Studio = "Gemini (Google AI Studio)",
+  Bedrock = "Amazon Bedrock",
+  OpenAI_Compatible = "OpenAI-Compatible Endpoints (Groq, Together AI, Mistral AI, etc.)"
+}
+
+const provider_map: Record <string, string> = {
+  "OpenAI": "openai",
+  "Azure": "azure",
+  "Anthropic": "anthropic",
+  "Google_AI_Studio": "gemini",
+  "Bedrock": "bedrock",
+  "OpenAI_Compatible": "openai"
+};
 
 const ModelDashboard: React.FC<ModelDashboardProps> = ({
   accessToken,
@@ -54,8 +74,12 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
   const [modelMetrics, setModelMetrics] = useState<any[]>([]);
   const [pendingRequests, setPendingRequests] = useState<any[]>([]);
   const [form] = Form.useForm();
+  const [modelMap, setModelMap] = useState<any>(null);
 
-  const providers = ["OpenAI", "Azure OpenAI", "Anthropic", "Gemini (Google AI Studio)", "Amazon Bedrock", "OpenAI-Compatible Endpoints (Groq, Together AI, Mistral AI, etc.)"]
+  const [providerModels, setProviderModels] = useState<Array<string>>([]); // Explicitly typing providerModels as a string array
+
+  const providers: Providers[] = [Providers.OpenAI, Providers.Azure, Providers.Anthropic, Providers.Google_AI_Studio, Providers.Bedrock, Providers.OpenAI_Compatible]
+  
   const [selectedProvider, setSelectedProvider] = useState<String>("OpenAI");
 
   useEffect(() => {
@@ -96,7 +120,16 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
     if (accessToken && token && userRole && userID) {
       fetchData();
     }
-  }, [accessToken, token, userRole, userID]);
+
+    const fetchModelMap = async () => {
+      const data = await modelCostMap()
+      console.log(`received model cost map data: ${Object.keys(data)}`)
+      setModelMap(data)
+    }
+    if (modelMap == null) {
+      fetchModelMap()
+    }
+  }, [accessToken, token, userRole, userID, modelMap]);
 
   if (!modelData) {
     return <div>Loading...</div>;
@@ -110,7 +143,7 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
   // loop through model data and edit each row
   for (let i = 0; i < modelData.data.length; i++) {
     let curr_model = modelData.data[i];
-    let litellm_model_name = curr_model?.litellm_params?.mode
+    let litellm_model_name = curr_model?.litellm_params?.model
     let model_info = curr_model?.model_info;
 
     let defaultProvider = "openai";
@@ -119,6 +152,21 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
     let output_cost = "Undefined";
     let max_tokens = "Undefined";
     let cleanedLitellmParams = {};
+
+    const getProviderFromModel = (model: string) => {
+      /**
+       * Use model map
+       * - check if model in model map
+       * - return it's litellm_provider, if so 
+       */
+      console.log(`GET PROVIDER CALLED! - ${modelMap}`)
+      if (modelMap !== null && modelMap !== undefined) {
+        if (typeof modelMap == "object" && model in modelMap) {
+          return modelMap[model]["litellm_provider"]
+        }
+      }
+      return "openai"
+    }
 
     // Check if litellm_model_name is null or undefined
     if (litellm_model_name) {
@@ -129,10 +177,10 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
       let firstElement = splitModel[0];
 
       // If there is only one element, default provider to openai
-      provider = splitModel.length === 1 ? defaultProvider : firstElement;
+      provider = splitModel.length === 1 ? getProviderFromModel(litellm_model_name) : firstElement;
     } else {
       // litellm_model_name is null or undefined, default provider to openai
-      provider = defaultProvider;
+      provider = "openai"
     }
 
     if (model_info) {
@@ -175,65 +223,112 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
     );
   }
 
+  const handleDelete = async (model_id: string) => {
+    await modelDeleteCall(accessToken, model_id)
+  };
+
+
+  const setProviderModelsFn = (provider: string) => {
+    console.log(`received provider string: ${provider}`)
+    const providerEnumValue = Providers[provider as keyof typeof Providers];
+    console.log(`received providerEnumValue: ${providerEnumValue}`)
+    const mappingResult = provider_map[providerEnumValue]; // Get the corresponding value from the mapping
+    console.log(`mappingResult: ${mappingResult}`)
+    let _providerModels: Array<string> = []
+    if (typeof modelMap === 'object') {
+      Object.entries(modelMap).forEach(([key, value]) => {
+        if (value !== null && typeof value === 'object' && "litellm_provider" in value && value["litellm_provider"] === mappingResult) {
+          _providerModels.push(key);
+        }
+      });
+    }
+    setProviderModels(_providerModels)
+    console.log(`providerModels: ${providerModels}`);
+  }
+
   const handleSubmit = async (formValues: Record<string, any>) => {
     try {
+      /**
+       * For multiple litellm model names - create a separate deployment for each 
+       * - get the list
+       * - iterate through it 
+       * - create a new deployment for each
+       */
 
+      // get the list of deployments
+      let deployments: Array<string> = Object.values(formValues["model"])
+      console.log(`received deployments: ${deployments}`)
+      console.log(`received type of deployments: ${typeof deployments}`)
+      deployments.forEach(async (litellm_model) => { 
+        console.log(`litellm_model: ${litellm_model}`)
+        const litellmParamsObj: Record<string, any>  = {};
+        const modelInfoObj: Record<string, any>  = {};
+        // Iterate through the key-value pairs in formValues
+        litellmParamsObj["model"] = litellm_model
+        let modelName: string  = "";
+        for (const [key, value] of Object.entries(formValues)) {
+          if (key == "model_name") {
+            modelName = modelName + value
+          }
+          else if (key == "custom_llm_provider") {
+            // const providerEnumValue = Providers[value as keyof typeof Providers];
+            // const mappingResult = provider_map[providerEnumValue]; // Get the corresponding value from the mapping
+            // modelName = mappingResult + "/" + modelName
+            continue
+          }
+          else if (key == "model") {
+            continue
+          }
 
-      const litellmParamsObj: Record<string, any>  = {};
-      const modelInfoObj: Record<string, any>  = {};
-      let modelName: string  = "";
-      // Iterate through the key-value pairs in formValues
-      for (const [key, value] of Object.entries(formValues)) {
-        if (key == "model_name") {
-          modelName = value
-        }
+          // Check if key is "base_model"
+          else if (key === "base_model") {
+            // Add key-value pair to model_info dictionary
+            modelInfoObj[key] = value;
+          }
 
-        // Check if key is any of the specified API related keys
-        if (key === "api_key" || key === "model" || key === "api_base" || key === "api_version" || key.startsWith("aws_")) {
-          // Add key-value pair to litellm_params dictionary
-          litellmParamsObj[key] = value;
-        }
-
-        // Check if key is "base_model"
-        if (key === "base_model") {
-          // Add key-value pair to model_info dictionary
-          modelInfoObj[key] = value;
-        }
-
-
-        if (key == "litellm_extra_params") {
-          console.log("litellm_extra_params:", value);
-          let litellmExtraParams = {};
-          if (value && value != undefined) {
-            try {
-              litellmExtraParams = JSON.parse(value);
-            }
-            catch (error) {
-              message.error("Failed to parse LiteLLM Extra Params: " + error);
-              throw new Error("Failed to parse litellm_extra_params: " + error);
-            }
-            for (const [key, value] of Object.entries(litellmExtraParams)) {
-              litellmParamsObj[key] = value;
+          else if (key == "litellm_extra_params") {
+            console.log("litellm_extra_params:", value);
+            let litellmExtraParams = {};
+            if (value && value != undefined) {
+              try {
+                litellmExtraParams = JSON.parse(value);
+              }
+              catch (error) {
+                message.error("Failed to parse LiteLLM Extra Params: " + error);
+                throw new Error("Failed to parse litellm_extra_params: " + error);
+              }
+              for (const [key, value] of Object.entries(litellmExtraParams)) {
+                litellmParamsObj[key] = value;
+              }
             }
           }
+
+          // Check if key is any of the specified API related keys
+          else {
+            // Add key-value pair to litellm_params dictionary
+            litellmParamsObj[key] = value;
+          }
         }
-      }
 
-      const new_model: Model = {  
-        "model_name": modelName,
-        "litellm_params": litellmParamsObj,
-        "model_info": modelInfoObj
-      }
+        const new_model: Model = {  
+          "model_name": modelName,
+          "litellm_params": litellmParamsObj,
+          "model_info": modelInfoObj
+        }
+  
+        
+  
+        const response: any = await modelCreateCall(
+          accessToken,
+          new_model
+        );
 
+        console.log(`response for model create call: ${response["data"]}`);
+      }); 
       
-
-      const response: any = await modelCreateCall(
-        accessToken,
-        new_model
-      );
       form.resetFields();
 
-      console.log(`response for model create call: ${response["data"]}`);
+      
       } catch (error) {
         message.error("Failed to create model: " + error);
       }
@@ -252,7 +347,7 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
   };
 
   console.log(`selectedProvider: ${selectedProvider}`)
-
+  console.log(`providerModels.length: ${providerModels.length}`)
   return (
     <div style={{ width: "100%", height: "100%"}}>
       <TabGroup className="gap-2 p-8 h-[75vh] w-full mt-2">
@@ -290,8 +385,8 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
               </TableRow>
             </TableHead>
             <TableBody>
-              {modelData.data.map((model: any) => (
-                <TableRow key={model.model_name}>
+              {modelData.data.map((model: any, index: number) => (
+                <TableRow key={index}>
                   <TableCell>
                     <Text>{model.model_name}</Text>
                   </TableCell>
@@ -311,6 +406,7 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
                   <TableCell>{model.input_cost}</TableCell>
                   <TableCell>{model.output_cost}</TableCell>
                   <TableCell>{model.max_tokens}</TableCell>
+                  <TableCell><Icon icon={TrashIcon} size="sm" onClick={() => handleDelete(model.model_info.id)}/></TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -363,6 +459,7 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
                       key={index}
                       value={provider}
                       onClick={() => {
+                        setProviderModelsFn(provider);
                         setSelectedProvider(provider);
                       }}
                     >
@@ -376,18 +473,29 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
                 </Form.Item>
                 <Row>
                 <Col span={10}></Col>
-                <Col span={10}><Text className="mb-3 mt-1">Model name your users will pass in. Also used for <Link href="https://docs.litellm.ai/docs/proxy/reliability#step-1---set-deployments-on-config" target="_blank">loadbalancing.</Link></Text></Col>
+                <Col span={10}><Text className="mb-3 mt-1">Model name your users will pass in.</Text></Col>
                 </Row>
-                <Form.Item rules={[{ required: true, message: 'Required' }]} label="LiteLLM Model Name" name="model" tooltip="Actual model name used for making litellm.completion() call." className="mb-0">
-                  <TextInput placeholder="gpt-3.5-turbo-0125"/>
+                <Form.Item rules={[{ required: true, message: 'Required' }]} label="LiteLLM Model Name(s)" name="model" tooltip="Actual model name used for making litellm.completion() call." className="mb-0">
+                  {
+                    providerModels.length > 0 ? 
+                    <MultiSelect value={providerModels}>
+                      {providerModels.map((model, index) => (
+                          <MultiSelectItem
+                            key={index}
+                            value={model}
+                          >
+                            {model}
+                          </MultiSelectItem>
+                        ))}
+                    </MultiSelect>
+                    : <TextInput placeholder="gpt-3.5-turbo-0125"/>
+                  }
                 </Form.Item>
                 <Row>
                 <Col span={10}></Col>
-                <Col span={10}><Text className="mb-3 mt-1">Actual model name used for making <Link href="https://docs.litellm.ai/docs/providers" target="_blank">litellm.completion() call</Link></Text></Col>
-                </Row>
-                
+                <Col span={10}><Text className="mb-3 mt-1">Actual model name used for making<Link href="https://docs.litellm.ai/docs/providers" target="_blank">litellm.completion() call</Link>.We&apos;ll<Link href="https://docs.litellm.ai/docs/proxy/reliability#step-1---set-deployments-on-config" target="_blank">loadbalance</Link> models with the same &apos;public name&apos;</Text></Col></Row>
                 {
-                  selectedProvider != "Amazon Bedrock" && <Form.Item
+                  selectedProvider != Providers.Bedrock && <Form.Item
                   rules={[{ required: true, message: 'Required' }]}
                     label="API Key"
                     name="api_key"
@@ -396,7 +504,15 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
                   </Form.Item>
                 }
                 {
-                  (selectedProvider == "Azure OpenAI" || selectedProvider == "OpenAI-Compatible Endpoints (Groq, Together AI, Mistral AI, etc.)") && <Form.Item
+                  selectedProvider == Providers.OpenAI && <Form.Item
+                    label="Organization ID"
+                    name="organization_id"
+                  >
+                    <TextInput placeholder="[OPTIONAL] my-unique-org"/>
+                  </Form.Item>
+                }
+                {
+                  (selectedProvider == Providers.Azure || selectedProvider == Providers.OpenAI_Compatible) && <Form.Item
                   rules={[{ required: true, message: 'Required' }]}
                   label="API Base"
                   name="api_base"
@@ -405,7 +521,7 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
                 </Form.Item>
                 }
                 {
-                  selectedProvider == "Azure OpenAI" && <Form.Item
+                  selectedProvider == Providers.Azure && <Form.Item
                   rules={[{ required: true, message: 'Required' }]}
                   label="API Version"
                   name="api_version"
@@ -414,7 +530,7 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
                 </Form.Item>
                 }
                 {
-                  selectedProvider == "Azure OpenAI" && <Form.Item
+                  selectedProvider == Providers.Azure && <Form.Item
                   label="Base Model"
                   name="base_model"
                 >
@@ -423,7 +539,7 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
                 </Form.Item>
                 }
                 {
-                  selectedProvider == "Amazon Bedrock" && <Form.Item
+                  selectedProvider == Providers.Bedrock && <Form.Item
                   rules={[{ required: true, message: 'Required' }]}
                   label="AWS Access Key ID"
                   name="aws_access_key_id"
@@ -433,7 +549,7 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
                 </Form.Item>
                 }
                 {
-                  selectedProvider == "Amazon Bedrock" && <Form.Item
+                  selectedProvider == Providers.Bedrock && <Form.Item
                   rules={[{ required: true, message: 'Required' }]}
                   label="AWS Secret Access Key"
                   name="aws_secret_access_key"
@@ -443,7 +559,7 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
                 </Form.Item>
                 }
                 {
-                  selectedProvider == "Amazon Bedrock" && <Form.Item
+                  selectedProvider == Providers.Bedrock && <Form.Item
                   rules={[{ required: true, message: 'Required' }]}
                   label="AWS Region Name"
                   name="aws_region_name"
