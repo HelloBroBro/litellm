@@ -15,7 +15,7 @@ import {
 } from "@tremor/react";
 import { TabPanel, TabPanels, TabGroup, TabList, Tab, TextInput, Icon } from "@tremor/react";
 import { Select, SelectItem, MultiSelect, MultiSelectItem } from "@tremor/react";
-import { modelInfoCall, userGetRequesedtModelsCall, modelMetricsCall, modelCreateCall, Model, modelCostMap, modelDeleteCall } from "./networking";
+import { modelInfoCall, userGetRequesedtModelsCall, modelMetricsCall, modelCreateCall, Model, modelCostMap, modelDeleteCall, healthCheckCall } from "./networking";
 import { BarChart } from "@tremor/react";
 import {
   Button as Button2,
@@ -81,6 +81,9 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
   const providers: Providers[] = [Providers.OpenAI, Providers.Azure, Providers.Anthropic, Providers.Google_AI_Studio, Providers.Bedrock, Providers.OpenAI_Compatible]
   
   const [selectedProvider, setSelectedProvider] = useState<String>("OpenAI");
+  const [healthCheckResponse, setHealthCheckResponse] = useState<string>('');
+
+
 
   useEffect(() => {
     if (!accessToken || !token || !userRole || !userID) {
@@ -246,6 +249,18 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
     console.log(`providerModels: ${providerModels}`);
   }
 
+  const runHealthCheck = async () => {
+    try {
+      message.info('Running health check...');
+      setHealthCheckResponse('');
+      const response = await healthCheckCall(accessToken);
+      setHealthCheckResponse(response);
+    } catch (error) {
+      console.error('Error running health check:', error);
+      setHealthCheckResponse('Error running health check');
+    }
+  };
+
   const handleSubmit = async (formValues: Record<string, any>) => {
     try {
       /**
@@ -294,7 +309,7 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
                 litellmExtraParams = JSON.parse(value);
               }
               catch (error) {
-                message.error("Failed to parse LiteLLM Extra Params: " + error);
+                message.error("Failed to parse LiteLLM Extra Params: " + error, 20);
                 throw new Error("Failed to parse litellm_extra_params: " + error);
               }
               for (const [key, value] of Object.entries(litellmExtraParams)) {
@@ -330,7 +345,7 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
 
       
       } catch (error) {
-        message.error("Failed to create model: " + error);
+        message.error("Failed to create model: " + error, 20);
       }
   }
 
@@ -354,6 +369,7 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
         <TabList className="mt-2">
           <Tab>All Models</Tab>
           <Tab>Add Model</Tab>
+          <Tab><pre>/health Models</pre></Tab>
         </TabList>
       
       <TabPanels>
@@ -476,20 +492,19 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
                 <Col span={10}><Text className="mb-3 mt-1">Model name your users will pass in.</Text></Col>
                 </Row>
                 <Form.Item rules={[{ required: true, message: 'Required' }]} label="LiteLLM Model Name(s)" name="model" tooltip="Actual model name used for making litellm.completion() call." className="mb-0">
-                  {
-                    providerModels.length > 0 ? 
-                    <MultiSelect value={providerModels}>
-                      {providerModels.map((model, index) => (
-                          <MultiSelectItem
-                            key={index}
-                            value={model}
-                          >
+                  {selectedProvider === Providers.Azure ? (
+                      <TextInput placeholder="Enter model name" />
+                    ) : providerModels.length > 0 ? (
+                      <MultiSelect value={providerModels}>
+                        {providerModels.map((model, index) => (
+                          <MultiSelectItem key={index} value={model}>
                             {model}
                           </MultiSelectItem>
                         ))}
-                    </MultiSelect>
-                    : <TextInput placeholder="gpt-3.5-turbo-0125"/>
-                  }
+                      </MultiSelect>
+                    ) : (
+                      <TextInput placeholder="gpt-3.5-turbo-0125" />
+                    )}
                 </Form.Item>
                 <Row>
                 <Col span={10}></Col>
@@ -593,6 +608,17 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
               </Tooltip>
         </Form>
       </Card>
+      </TabPanel>
+      <TabPanel>
+        <Card>
+          <Text>`/health` will run a very small request through your models configured on litellm</Text>
+
+          <Button onClick={runHealthCheck}>Run `/health`</Button>
+          {healthCheckResponse && (
+                <pre>{JSON.stringify(healthCheckResponse, null, 2)}</pre>
+              )}
+
+        </Card>
       </TabPanel>
       </TabPanels>
       </TabGroup>

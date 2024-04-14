@@ -1836,6 +1836,9 @@ async def _run_background_health_check():
         await asyncio.sleep(health_check_interval)
 
 
+semaphore = asyncio.Semaphore(1)
+
+
 class ProxyConfig:
     """
     Abstraction class on top of config loading/updating logic. Gives us one place to control all config updating logic.
@@ -2425,8 +2428,7 @@ class ProxyConfig:
             for k, v in router_settings.items():
                 if k in available_args:
                     router_params[k] = v
-
-        router = litellm.Router(**router_params)  # type:ignore
+        router = litellm.Router(**router_params, semaphore=semaphore)  # type:ignore
         return router, model_list, general_settings
 
     async def add_deployment(
@@ -2439,7 +2441,7 @@ class ProxyConfig:
         - Check if model id's in router already
         - If not, add to router
         """
-        global llm_router, llm_model_list, master_key
+        global llm_router, llm_model_list, master_key, general_settings
 
         import base64
 
@@ -2539,7 +2541,7 @@ class ProxyConfig:
             config_data = await proxy_config.get_config()
             litellm_settings = config_data.get("litellm_settings", {}) or {}
             success_callbacks = litellm_settings.get("success_callback", None)
-            _added_callback = False
+
             if success_callbacks is not None and isinstance(success_callbacks, list):
                 for success_callback in success_callbacks:
                     if success_callback not in litellm.success_callback:
@@ -2555,6 +2557,13 @@ class ProxyConfig:
                     verbose_proxy_logger.error(
                         "Error setting env variable: %s - %s", k, str(e)
                     )
+
+            # general_settings
+            _general_settings = config_data.get("general_settings", {})
+            if "alerting" in _general_settings:
+                general_settings["alerting"] = _general_settings["alerting"]
+                proxy_logging_obj.alerting = general_settings["alerting"]
+
         except Exception as e:
             verbose_proxy_logger.error(
                 "{}\nTraceback:{}".format(str(e), traceback.format_exc())
@@ -3184,6 +3193,11 @@ async def startup_event():
                 seconds=30,
                 args=[prisma_client, proxy_logging_obj],
             )
+
+            # this will load all existing models on proxy startup
+            await proxy_config.add_deployment(
+                prisma_client=prisma_client, proxy_logging_obj=proxy_logging_obj
+            )
         scheduler.start()
 
 
@@ -3421,6 +3435,7 @@ async def chat_completion(
 ):
     global general_settings, user_debug, proxy_logging_obj, llm_model_list
     try:
+        # async with llm_router.sem
         data = {}
         body = await request.body()
         body_str = body.decode()
@@ -3525,7 +3540,9 @@ async def chat_completion(
         tasks = []
         tasks.append(
             proxy_logging_obj.during_call_hook(
-                data=data, user_api_key_dict=user_api_key_dict, call_type="completion"
+                data=data,
+                user_api_key_dict=user_api_key_dict,
+                call_type="completion",
             )
         )
 
@@ -8113,7 +8130,7 @@ async def update_config(config_info: ConfigYAML):
 
     Currently supports modifying General Settings + LiteLLM settings
     """
-    global llm_router, llm_model_list, general_settings, proxy_config, proxy_logging_obj, master_key
+    global llm_router, llm_model_list, general_settings, proxy_config, proxy_logging_obj, master_key, prisma_client
     try:
         import base64
 
@@ -8181,6 +8198,12 @@ async def update_config(config_info: ConfigYAML):
         # Save the updated config
         await proxy_config.save_config(new_config=config)
 
+        # make sure the change is instantly rolled out for langfuse
+        if prisma_client is not None:
+            await proxy_config.add_deployment(
+                prisma_client=prisma_client, proxy_logging_obj=proxy_logging_obj
+            )
+
         # Test new connections
         ## Slack
         if "slack" in config.get("general_settings", {}).get("alerting", []):
@@ -8216,15 +8239,80 @@ async def update_config(config_info: ConfigYAML):
 async def get_config():
     """
     For Admin UI - allows admin to view config via UI
+    # return the callbacks and the env variables for the callback
 
     """
     global llm_router, llm_model_list, general_settings, proxy_config, proxy_logging_obj, master_key
     try:
+        import base64
 
         config_data = await proxy_config.get_config()
-        config_data = config_data.get("litellm_settings", {})
+        _litellm_settings = config_data.get("litellm_settings", {})
+        _general_settings = config_data.get("general_settings", {})
+        environment_variables = config_data.get("environment_variables", {})
 
-        return {"data": config_data, "status": "success"}
+        # check if "langfuse" in litellm_settings
+        _success_callbacks = _litellm_settings.get("success_callback", [])
+        _data_to_return = []
+        """
+        [
+            {
+                "name": "langfuse",
+                "variables": {
+                    "LANGFUSE_PUB_KEY": "value",
+                    "LANGFUSE_SECRET_KEY": "value",
+                    "LANGFUSE_HOST": "value"
+                },
+            }
+        ]
+        
+        """
+        for _callback in _success_callbacks:
+            if _callback == "langfuse":
+                _langfuse_vars = [
+                    "LANGFUSE_PUBLIC_KEY",
+                    "LANGFUSE_SECRET_KEY",
+                    "LANGFUSE_HOST",
+                ]
+                _langfuse_env_vars = {}
+                for _var in _langfuse_vars:
+                    env_variable = environment_variables.get(_var, None)
+                    if env_variable is None:
+                        _langfuse_env_vars[_var] = None
+                    else:
+                        # decode + decrypt the value
+                        decoded_b64 = base64.b64decode(env_variable)
+                        _decrypted_value = decrypt_value(
+                            value=decoded_b64, master_key=master_key
+                        )
+                        _langfuse_env_vars[_var] = _decrypted_value
+
+                _data_to_return.append(
+                    {"name": _callback, "variables": _langfuse_env_vars}
+                )
+
+        # Check if slack alerting is on
+        _alerting = _general_settings.get("alerting", [])
+        if "slack" in _alerting:
+            _slack_vars = [
+                "SLACK_WEBHOOK_URL",
+            ]
+            _slack_env_vars = {}
+            for _var in _slack_vars:
+                env_variable = environment_variables.get(_var, None)
+                if env_variable is None:
+                    _slack_env_vars[_var] = None
+                else:
+                    # decode + decrypt the value
+                    decoded_b64 = base64.b64decode(env_variable)
+                    _decrypted_value = decrypt_value(
+                        value=decoded_b64, master_key=master_key
+                    )
+                    _slack_env_vars[_var] = _decrypted_value
+
+            _data_to_return.append({"name": "slack", "variables": _slack_env_vars})
+
+        return {"status": "success", "data": _data_to_return}
     except Exception as e:
         traceback.print_exc()
         if isinstance(e, HTTPException):
@@ -8298,7 +8386,7 @@ async def test_endpoint(request: Request):
 )
 async def health_services_endpoint(
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
-    service: Literal["slack_budget_alerts"] = fastapi.Query(
+    service: Literal["slack_budget_alerts", "langfuse", "slack"] = fastapi.Query(
         description="Specify the service being hit."
     ),
 ):
@@ -8314,8 +8402,7 @@ async def health_services_endpoint(
             raise HTTPException(
                 status_code=400, detail={"error": "Service must be specified."}
             )
-
-        if service not in ["slack_budget_alerts"]:
+        if service not in ["slack_budget_alerts", "langfuse", "slack"]:
             raise HTTPException(
                 status_code=400,
                 detail={
@@ -8323,9 +8410,29 @@ async def health_services_endpoint(
                 },
             )
 
+        if service == "langfuse":
+            from litellm.integrations.langfuse import LangFuseLogger
+
+            langfuse_logger = LangFuseLogger()
+            langfuse_logger.Langfuse.auth_check()
+            _ = litellm.completion(
+                model="openai/litellm-mock-response-model",
+                messages=[{"role": "user", "content": "Hey, how's it going?"}],
+                user="litellm:/health/services",
+                mock_response="This is a mock response",
+            )
+            return {
+                "status": "success",
+                "message": "Mock LLM request made - check langfuse.",
+            }
+
         if "slack" in general_settings.get("alerting", []):
             test_message = f"""\n🚨 `ProjectedLimitExceededError` 💸\n\n`Key Alias:` litellm-ui-test-alert \n`Expected Day of Error`: 28th March \n`Current Spend`: $100.00 \n`Projected Spend at end of month`: $1000.00 \n`Soft Limit`: $700"""
             await proxy_logging_obj.alerting_handler(message=test_message, level="Low")
+            return {
+                "status": "success",
+                "message": "Mock Slack Alert sent, verify Slack Alert Received on your channel",
+            }
         else:
             raise HTTPException(
                 status_code=422,
