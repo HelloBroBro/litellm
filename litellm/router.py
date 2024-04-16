@@ -1103,6 +1103,7 @@ class Router:
             raise e
 
     async def _aembedding(self, input: Union[str, List], model: str, **kwargs):
+        model_name = None
         try:
             verbose_router_logger.debug(
                 f"Inside _aembedding()- model: {model}; kwargs: {kwargs}"
@@ -2287,6 +2288,29 @@ class Router:
         self.model_names.append(deployment.model_name)
         return
 
+    def delete_deployment(self, id: str) -> Optional[Deployment]:
+        """
+        Parameters:
+        - id: str - the id of the deployment to be deleted
+
+        Returns:
+        - The deleted deployment
+        - OR None (if deleted deployment not found)
+        """
+        deployment_idx = None
+        for idx, m in enumerate(self.model_list):
+            if m["model_info"]["id"] == id:
+                deployment_idx = idx
+
+        try:
+            if deployment_idx is not None:
+                item = self.model_list.pop(deployment_idx)
+                return item
+            else:
+                return None
+        except:
+            return None
+
     def get_deployment(self, model_id: str):
         for model in self.model_list:
             if "model_info" in model and "id" in model["model_info"]:
@@ -2306,7 +2330,9 @@ class Router:
         return self.model_names
 
     def get_model_list(self):
-        return self.model_list
+        if hasattr(self, "model_list"):
+            return self.model_list
+        return None
 
     def _get_client(self, deployment, kwargs, client_type=None):
         """
@@ -2774,7 +2800,10 @@ class Router:
                         }
             else:
                 # check response_ms and update num_successes
-                response_ms = response.get("_response_ms", 0)
+                if isinstance(response, dict):
+                    response_ms = response.get("_response_ms", 0)
+                else:
+                    response_ms = 0
                 if model_id is not None:
                     if model_id in self.deployment_stats:
                         # check if avg_latency exists

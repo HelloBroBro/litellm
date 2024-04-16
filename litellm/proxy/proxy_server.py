@@ -703,7 +703,11 @@ async def user_api_key_auth(
                 verbose_proxy_logger.debug(
                     f"model: {model}; allowed_models: {filtered_models}"
                 )
-                if model is not None and model not in filtered_models:
+                if (
+                    model is not None
+                    and model not in filtered_models
+                    and "*" not in filtered_models
+                ):
                     raise ValueError(
                         f"API Key not allowed to access model. This token can only access models={valid_token.models}. Tried to access {model}"
                     )
@@ -1098,7 +1102,9 @@ async def user_api_key_auth(
             allowed_routes = [
                 "/sso",
                 "/login",
-                "/key",
+                "/key/generate",
+                "/key/update",
+                "/key/info",
                 "/config",
                 "/spend",
                 "/user",
@@ -1896,7 +1902,15 @@ class ProxyConfig:
                     param_name = getattr(response, "param_name", None)
                     param_value = getattr(response, "param_value", None)
                     if param_name is not None and param_value is not None:
-                        config[param_name] = param_value
+                        # check if param_name is already in the config
+                        if param_name in config:
+                            if isinstance(config[param_name], dict):
+                                config[param_name].update(param_value)
+                            else:
+                                config[param_name] = param_value
+                        else:
+                            # if it's not in the config - then add it
+                            config[param_name] = param_value
 
         return config
 
@@ -2431,6 +2445,52 @@ class ProxyConfig:
         router = litellm.Router(**router_params, semaphore=semaphore)  # type:ignore
         return router, model_list, general_settings
 
+    async def _delete_deployment(self, db_models: list):
+        """
+        (Helper function of add deployment) -> combined to reduce prisma db calls
+
+        - Create all up list of model id's (db + config)
+        - Compare all up list to router model id's
+        - Remove any that are missing
+        """
+        global user_config_file_path, llm_router
+        combined_id_list = []
+        if llm_router is None:
+            return
+
+        ## DB MODELS ##
+        for m in db_models:
+            if m.model_info is not None and isinstance(m.model_info, dict):
+                if "id" not in m.model_info:
+                    m.model_info["id"] = m.model_id
+                combined_id_list.append(m.model_info)
+            else:
+                combined_id_list.append(m.model_id)
+        ## CONFIG MODELS ##
+        config = await self.get_config(config_file_path=user_config_file_path)
+        model_list = config.get("model_list", None)
+        if model_list:
+            for model in model_list:
+                ### LOAD FROM os.environ/ ###
+                for k, v in model["litellm_params"].items():
+                    if isinstance(v, str) and v.startswith("os.environ/"):
+                        model["litellm_params"][k] = litellm.get_secret(v)
+                litellm_model_name = model["litellm_params"]["model"]
+                litellm_model_api_base = model["litellm_params"].get("api_base", None)
+
+                model_id = litellm.Router()._generate_model_id(
+                    model_group=model["model_name"],
+                    litellm_params=model["litellm_params"],
+                )
+                combined_id_list.append(model_id)  # ADD CONFIG MODEL TO COMBINED LIST
+
+        router_model_ids = llm_router.get_model_ids()
+
+        # Check for model IDs in llm_router not present in combined_id_list and delete them
+        for model_id in router_model_ids:
+            if model_id not in combined_id_list:
+                llm_router.delete_deployment(id=model_id)
+
     async def add_deployment(
         self,
         prisma_client: PrismaClient,
@@ -2494,13 +2554,13 @@ class ProxyConfig:
                 verbose_proxy_logger.debug(f"_model_list: {_model_list}")
                 llm_router = litellm.Router(model_list=_model_list)
                 verbose_proxy_logger.debug(f"updated llm_router: {llm_router}")
-                verbose_proxy_logger.debug(
-                    f"llm_router model list: {llm_router.model_list}"
-                )
             else:
                 new_models = await prisma_client.db.litellm_proxymodeltable.find_many()
                 verbose_proxy_logger.debug(f"len new_models: {len(new_models)}")
+                ## DELETE MODEL LOGIC
+                await self._delete_deployment(db_models=new_models)
 
+                ## ADD MODEL LOGIC
                 for m in new_models:
                     _litellm_params = m.litellm_params
                     if isinstance(_litellm_params, dict):
@@ -2809,12 +2869,17 @@ async def delete_verification_token(tokens: List, user_id: Optional[str] = None)
                 deleted_tokens = await prisma_client.delete_data(
                     tokens=tokens, user_id=user_id
                 )
-
+                _num_deleted_tokens = deleted_tokens.get("deleted_keys", 0)
+                if _num_deleted_tokens != len(tokens):
+                    raise Exception(
+                        "Failed to delete all tokens. Tried to delete tokens that don't belong to user: "
+                        + str(user_id)
+                    )
         else:
-            raise Exception
+            raise Exception("DB not connected. prisma_client is None")
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        raise e
     return deleted_tokens
 
 
@@ -5592,7 +5657,7 @@ async def new_user(data: NewUserRequest):
     if "user_role" in data_json:
         user_role = data_json["user_role"]
         if user_role is not None:
-            if user_role not in ["admin", "app_owner", "app_user"]:
+            if user_role not in ["proxy_admin", "app_owner", "app_user"]:
                 raise ProxyException(
                     message=f"Invalid user role, passed in {user_role}. Must be one of 'admin', 'app_owner', 'app_user'",
                     type="invalid_user_role",
@@ -6313,7 +6378,7 @@ async def update_team(
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
     """
-    [RECOMMENDED] - use `/team/member_add` to add new team members instead
+    Use `/team/member_add` AND `/team/member/delete` to add/remove new team members  
 
     You can now update team budget / rate limits via /team/update
 
@@ -6363,60 +6428,6 @@ async def update_team(
         team_id=data.team_id,
     )
 
-    ## ADD NEW USERS ##
-    existing_user_id_list = []
-    ## Get new users
-    for user in existing_team_row.members_with_roles:
-        if user["user_id"] is not None:
-            existing_user_id_list.append(user["user_id"])
-
-    ## Update new user rows with team id (info used by /user/info to show all teams, user is a part of)
-    if data.members_with_roles is not None:
-        for user in data.members_with_roles:
-            if user.user_id not in existing_user_id_list:
-                await prisma_client.update_data(
-                    user_id=user.user_id,
-                    data={
-                        "user_id": user.user_id,
-                        "teams": [team_row["team_id"]],
-                        "models": team_row["data"].models,
-                    },
-                    update_key_values_custom_query={
-                        "teams": {
-                            "push": [team_row["team_id"]],
-                        }
-                    },
-                    table_name="user",
-                )
-
-    ## REMOVE DELETED USERS ##
-    ### Get list of deleted users (old list - new list)
-    deleted_user_id_list = []
-    new_user_id_list = []
-    ## Get old user list
-    if data.members_with_roles is not None:
-        for user in data.members_with_roles:
-            new_user_id_list.append(user.user_id)
-    ## Get diff
-    if existing_team_row.members_with_roles is not None:
-        for user in existing_team_row.members_with_roles:
-            if user["user_id"] not in new_user_id_list and len(new_user_id_list) > 0:
-                deleted_user_id_list.append(user["user_id"])
-
-    ## SET UPDATED LIST
-    if len(deleted_user_id_list) > 0:
-        # get the deleted users
-        existing_user_rows = await prisma_client.get_data(
-            user_id_list=deleted_user_id_list, table_name="user", query_type="find_all"
-        )
-        for user in existing_user_rows:
-            if data.team_id in user["teams"]:
-                user["teams"].remove(data.team_id)
-            await prisma_client.update_data(
-                user_id=user["user_id"],
-                data=user,
-                update_key_values={"user_id": user["user_id"], "teams": user["teams"]},
-            )
     return team_row
 
 
@@ -7036,6 +7047,7 @@ async def add_new_model(
                 },
             )
 
+        model_response = None
         # update DB
         if store_model_in_db == True:
             """
@@ -7050,16 +7062,20 @@ async def add_new_model(
                     model_params.litellm_params[k] = base64.b64encode(
                         encrypted_value
                     ).decode("utf-8")
-            await prisma_client.db.litellm_proxymodeltable.create(
-                data={
-                    "model_name": model_params.model_name,
-                    "litellm_params": model_params.litellm_params.model_dump_json(exclude_none=True),  # type: ignore
-                    "model_info": model_params.model_info.model_dump_json(  # type: ignore
-                        exclude_none=True
-                    ),
-                    "created_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
-                    "updated_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
-                }
+            _data: dict = {
+                "model_id": model_params.model_info.id,
+                "model_name": model_params.model_name,
+                "litellm_params": model_params.litellm_params.model_dump_json(exclude_none=True),  # type: ignore
+                "model_info": model_params.model_info.model_dump_json(  # type: ignore
+                    exclude_none=True
+                ),
+                "created_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
+                "updated_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
+            }
+            if model_params.model_info.id is not None:
+                _data["model_id"] = model_params.model_info.id
+            model_response = await prisma_client.db.litellm_proxymodeltable.create(
+                data=_data  # type: ignore
             )
 
             await proxy_config.add_deployment(
@@ -7073,7 +7089,8 @@ async def add_new_model(
                     "error": "Set `'STORE_MODEL_IN_DB='True'` in your env to enable this feature."
                 },
             )
-        return {"message": "Model added successfully"}
+
+        return model_response
 
     except Exception as e:
         traceback.print_exc()
@@ -7164,8 +7181,9 @@ async def model_info_v2(
             if k not in model_info:
                 model_info[k] = v
         model["model_info"] = model_info
-        # don't return the api key
+        # don't return the api key / vertex credentials
         model["litellm_params"].pop("api_key", None)
+        model["litellm_params"].pop("vertex_credentials", None)
 
     verbose_proxy_logger.debug("all_models: %s", all_models)
     return {"data": all_models}
@@ -7325,9 +7343,21 @@ async def delete_model(model_info: ModelInfoDelete):
             - store keys separately
             """
             # encrypt litellm params #
-            await prisma_client.db.litellm_proxymodeltable.delete(
+            result = await prisma_client.db.litellm_proxymodeltable.delete(
                 where={"model_id": model_info.id}
             )
+
+            if result is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"error": f"Model with id={model_info.id} not found in db"},
+                )
+
+            ## DELETE FROM ROUTER ##
+            if llm_router is not None:
+                llm_router.delete_deployment(id=model_info.id)
+
+            return {"message": f"Model: {result.model_id} deleted successfully"}
         else:
             raise HTTPException(
                 status_code=500,
@@ -7335,7 +7365,6 @@ async def delete_model(model_info: ModelInfoDelete):
                     "error": "Set `'STORE_MODEL_IN_DB='True'` in your env to enable this feature."
                 },
             )
-        return {"message": "Model deleted successfully"}
 
     except Exception as e:
         if isinstance(e, HTTPException):

@@ -4156,6 +4156,30 @@ def supports_function_calling(model: str):
         )
 
 
+def supports_vision(model: str):
+    """
+    Check if the given model supports vision and return a boolean value.
+
+    Parameters:
+    model (str): The model name to be checked.
+
+    Returns:
+    bool: True if the model supports vision, False otherwise.
+
+    Raises:
+    Exception: If the given model is not found in model_prices_and_context_window.json.
+    """
+    if model in litellm.model_cost:
+        model_info = litellm.model_cost[model]
+        if model_info.get("supports_vision", False):
+            return True
+        return False
+    else:
+        raise Exception(
+            f"Model not in model_prices_and_context_window.json. You passed model={model}."
+        )
+
+
 def supports_parallel_function_calling(model: str):
     """
     Check if the given model supports parallel function calling and return True if it does, False otherwise.
@@ -4523,6 +4547,7 @@ def get_optional_params(
             and custom_llm_provider != "vertex_ai"
             and custom_llm_provider != "anyscale"
             and custom_llm_provider != "together_ai"
+            and custom_llm_provider != "groq"
             and custom_llm_provider != "mistral"
             and custom_llm_provider != "anthropic"
             and custom_llm_provider != "cohere_chat"
@@ -5222,6 +5247,29 @@ def get_optional_params(
         optional_params["extra_body"] = (
             extra_body  # openai client supports `extra_body` param
         )
+    elif custom_llm_provider == "groq":
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
+        _check_valid_arg(supported_params=supported_params)
+
+        if temperature is not None:
+            optional_params["temperature"] = temperature
+        if max_tokens is not None:
+            optional_params["max_tokens"] = max_tokens
+        if top_p is not None:
+            optional_params["top_p"] = top_p
+        if stream is not None:
+            optional_params["stream"] = stream
+        if stop is not None:
+            optional_params["stop"] = stop
+        if tools is not None:
+            optional_params["tools"] = tools
+        if tool_choice is not None:
+            optional_params["tool_choice"] = tool_choice
+        if response_format is not None:
+            optional_params["response_format"] = tool_choice
+
     elif custom_llm_provider == "openrouter":
         supported_params = get_supported_openai_params(
             model=model, custom_llm_provider=custom_llm_provider
@@ -5425,6 +5473,17 @@ def get_supported_openai_params(model: str, custom_llm_provider: str):
             "max_tokens",
             "tools",
             "tool_choice",
+        ]
+    elif custom_llm_provider == "groq":
+        return [
+            "temperature",
+            "max_tokens",
+            "top_p",
+            "stream",
+            "stop",
+            "tools",
+            "tool_choice",
+            "response_format",
         ]
     elif custom_llm_provider == "cohere":
         return [
@@ -7499,7 +7558,6 @@ def exception_type(
                             message=f"AnthropicException - {original_exception.message}",
                             model=model,
                             llm_provider="anthropic",
-                            request=original_exception.request,
                         )
                     elif original_exception.status_code == 429:
                         exception_mapping_worked = True
@@ -7596,7 +7654,6 @@ def exception_type(
                             message=f"ReplicateException - {original_exception.message}",
                             model=model,
                             llm_provider="replicate",
-                            request=original_exception.request,
                         )
                     elif original_exception.status_code == 429:
                         exception_mapping_worked = True
@@ -8005,7 +8062,6 @@ def exception_type(
                             message=f"HuggingfaceException - {original_exception.message}",
                             model=model,
                             llm_provider="huggingface",
-                            request=original_exception.request,
                         )
                     elif original_exception.status_code == 429:
                         exception_mapping_worked = True
@@ -8065,7 +8121,6 @@ def exception_type(
                             message=f"AI21Exception - {original_exception.message}",
                             model=model,
                             llm_provider="ai21",
-                            request=original_exception.request,
                         )
                     if original_exception.status_code == 422:
                         exception_mapping_worked = True
@@ -8155,7 +8210,6 @@ def exception_type(
                             message=f"NLPCloudException - {original_exception.message}",
                             model=model,
                             llm_provider="nlp_cloud",
-                            request=original_exception.request,
                         )
                     elif (
                         original_exception.status_code == 429
@@ -8272,7 +8326,6 @@ def exception_type(
                             message=f"TogetherAIException - {original_exception.message}",
                             model=model,
                             llm_provider="together_ai",
-                            request=original_exception.request,
                         )
                     elif original_exception.status_code == 422:
                         exception_mapping_worked = True
@@ -8472,7 +8525,6 @@ def exception_type(
                             message=f"AzureException - {original_exception.message}",
                             model=model,
                             llm_provider="azure",
-                            request=original_exception.request,
                         )
                     if original_exception.status_code == 422:
                         exception_mapping_worked = True
@@ -8809,6 +8861,35 @@ class CustomStreamWrapper:
         if hold is False:  # reset
             self.holding_chunk = ""
         return hold, curr_chunk
+
+    def handle_anthropic_text_chunk(self, chunk):
+        str_line = chunk
+        if isinstance(chunk, bytes):  # Handle binary data
+            str_line = chunk.decode("utf-8")  # Convert bytes to string
+        text = ""
+        is_finished = False
+        finish_reason = None
+        if str_line.startswith("data:"):
+            data_json = json.loads(str_line[5:])
+            type_chunk = data_json.get("type", None)
+            if type_chunk == "completion":
+                text = data_json.get("completion")
+                finish_reason = data_json.get("stop_reason")
+                if finish_reason is not None:
+                    is_finished = True
+            return {
+                "text": text,
+                "is_finished": is_finished,
+                "finish_reason": finish_reason,
+            }
+        elif "error" in str_line:
+            raise ValueError(f"Unable to parse response. Original response: {str_line}")
+        else:
+            return {
+                "text": text,
+                "is_finished": is_finished,
+                "finish_reason": finish_reason,
+            }
 
     def handle_anthropic_chunk(self, chunk):
         str_line = chunk
@@ -9497,6 +9578,14 @@ class CustomStreamWrapper:
                 completion_obj["content"] = response_obj["text"]
                 if response_obj["is_finished"]:
                     self.received_finish_reason = response_obj["finish_reason"]
+            elif (
+                self.custom_llm_provider
+                and self.custom_llm_provider == "anthropic_text"
+            ):
+                response_obj = self.handle_anthropic_text_chunk(chunk)
+                completion_obj["content"] = response_obj["text"]
+                if response_obj["is_finished"]:
+                    self.received_finish_reason = response_obj["finish_reason"]
             elif self.model == "replicate" or self.custom_llm_provider == "replicate":
                 response_obj = self.handle_replicate_chunk(chunk)
                 completion_obj["content"] = response_obj["text"]
@@ -10074,6 +10163,7 @@ class CustomStreamWrapper:
                 or self.custom_llm_provider == "text-completion-openai"
                 or self.custom_llm_provider == "azure_text"
                 or self.custom_llm_provider == "anthropic"
+                or self.custom_llm_provider == "anthropic_text"
                 or self.custom_llm_provider == "huggingface"
                 or self.custom_llm_provider == "ollama"
                 or self.custom_llm_provider == "ollama_chat"

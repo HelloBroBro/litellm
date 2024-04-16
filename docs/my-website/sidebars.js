@@ -86,6 +86,7 @@ const sidebars = {
         "completion/stream",
         "completion/message_trimming",
         "completion/function_call",
+        "completion/vision",
         "completion/model_alias",
         "completion/batching",
         "completion/mock_requests",
@@ -115,6 +116,7 @@ const sidebars = {
       },
       items: [
         "providers/openai", 
+        "providers/text_completion_openai",
         "providers/openai_compatible",
         "providers/azure", 
         "providers/azure_ai", 
