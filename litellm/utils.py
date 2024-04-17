@@ -5407,7 +5407,9 @@ def get_api_base(model: str, optional_params: dict) -> Optional[str]:
     get_api_base(model="gemini/gemini-pro")
     ```
     """
-    _optional_params = LiteLLM_Params(**optional_params)  # convert to pydantic object
+    _optional_params = LiteLLM_Params(
+        model=model, **optional_params
+    )  # convert to pydantic object
     # get llm provider
     try:
         model, custom_llm_provider, dynamic_api_key, api_base = get_llm_provider(
@@ -7810,6 +7812,19 @@ def exception_type(
                         response=original_exception.response,
                     )
             elif custom_llm_provider == "vertex_ai":
+                if completion_kwargs is not None:
+                    # add model, deployment and model_group to the exception message
+                    _model = completion_kwargs.get("model")
+                    _kwargs = completion_kwargs.get("kwargs", {}) or {}
+                    _metadata = _kwargs.get("metadata", {}) or {}
+                    _model_group = _metadata.get("model_group")
+                    _deployment = _metadata.get("deployment")
+                    error_str += f"\nmodel: {_model}\n"
+                    if _model_group is not None:
+                        error_str += f"model_group: {_model_group}\n"
+                    if _deployment is not None:
+                        error_str += f"deployment: {_deployment}\n"
+
                 if (
                     "Vertex AI API has not been used in project" in error_str
                     or "Unable to find your project" in error_str
