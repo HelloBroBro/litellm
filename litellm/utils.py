@@ -226,6 +226,24 @@ class Function(OpenAIObject):
     arguments: str
     name: Optional[str] = None
 
+    def __init__(
+        self,
+        arguments: Union[Dict, str],
+        name: Optional[str] = None,
+        **params,
+    ):
+        if isinstance(arguments, Dict):
+            arguments = json.dumps(arguments)
+        else:
+            arguments = arguments
+
+        name = name
+
+        # Build a dictionary with the structure your BaseModel expects
+        data = {"arguments": arguments, "name": name, **params}
+
+        super(Function, self).__init__(**data)
+
 
 class ChatCompletionDeltaToolCall(OpenAIObject):
     id: Optional[str] = None
@@ -4878,37 +4896,11 @@ def get_optional_params(
         )
         _check_valid_arg(supported_params=supported_params)
 
-        if temperature is not None:
-            optional_params["temperature"] = temperature
-        if top_p is not None:
-            optional_params["top_p"] = top_p
-        if stream:
-            optional_params["stream"] = stream
-        if n is not None:
-            optional_params["candidate_count"] = n
-        if stop is not None:
-            if isinstance(stop, str):
-                optional_params["stop_sequences"] = [stop]
-            elif isinstance(stop, list):
-                optional_params["stop_sequences"] = stop
-        if max_tokens is not None:
-            optional_params["max_output_tokens"] = max_tokens
-        if response_format is not None and response_format["type"] == "json_object":
-            optional_params["response_mime_type"] = "application/json"
-        if tools is not None and isinstance(tools, list):
-            from vertexai.preview import generative_models
+        optional_params = litellm.VertexAIConfig().map_openai_params(
+            non_default_params=non_default_params,
+            optional_params=optional_params,
+        )
 
-            gtool_func_declarations = []
-            for tool in tools:
-                gtool_func_declaration = generative_models.FunctionDeclaration(
-                    name=tool["function"]["name"],
-                    description=tool["function"].get("description", ""),
-                    parameters=tool["function"].get("parameters", {}),
-                )
-                gtool_func_declarations.append(gtool_func_declaration)
-            optional_params["tools"] = [
-                generative_models.Tool(function_declarations=gtool_func_declarations)
-            ]
         print_verbose(
             f"(end) INSIDE THE VERTEX AI OPTIONAL PARAM BLOCK - optional_params: {optional_params}"
         )
@@ -5610,17 +5602,7 @@ def get_supported_openai_params(model: str, custom_llm_provider: str):
     elif custom_llm_provider == "palm" or custom_llm_provider == "gemini":
         return ["temperature", "top_p", "stream", "n", "stop", "max_tokens"]
     elif custom_llm_provider == "vertex_ai":
-        return [
-            "temperature",
-            "top_p",
-            "max_tokens",
-            "stream",
-            "tools",
-            "tool_choice",
-            "response_format",
-            "n",
-            "stop",
-        ]
+        return litellm.VertexAIConfig().get_supported_openai_params()
     elif custom_llm_provider == "sagemaker":
         return ["stream", "temperature", "max_tokens", "top_p", "stop", "n"]
     elif custom_llm_provider == "aleph_alpha":
@@ -6134,7 +6116,13 @@ def get_model_info(model: str):
                 "mode": "chat",
             }
         else:
-            raise Exception()
+            """
+            Check if model in model cost map
+            """
+            if model in litellm.model_cost:
+                return litellm.model_cost[model]
+            else:
+                raise Exception()
     except:
         raise Exception(
             "This model isn't mapped yet. Add it here - https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json"
@@ -8850,7 +8838,16 @@ class CustomStreamWrapper:
             raise e
 
     def check_special_tokens(self, chunk: str, finish_reason: Optional[str]):
+        """
+        Output parse <s> / </s> special tokens for sagemaker + hf streaming.
+        """
         hold = False
+        # if (
+        #     self.custom_llm_provider != "huggingface"
+        #     and self.custom_llm_provider != "sagemaker"
+        # ):
+        #     return hold, chunk
+
         if finish_reason:
             for token in self.special_tokens:
                 if token in chunk:
@@ -8866,6 +8863,7 @@ class CustomStreamWrapper:
         for token in self.special_tokens:
             if len(curr_chunk) < len(token) and curr_chunk in token:
                 hold = True
+                self.holding_chunk = curr_chunk
             elif len(curr_chunk) >= len(token):
                 if token in curr_chunk:
                     self.holding_chunk = curr_chunk.replace(token, "")
@@ -9947,6 +9945,7 @@ class CustomStreamWrapper:
                 f"model_response.choices[0].delta: {model_response.choices[0].delta}; completion_obj: {completion_obj}"
             )
             print_verbose(f"self.sent_first_chunk: {self.sent_first_chunk}")
+
             ## RETURN ARG
             if (
                 "content" in completion_obj
@@ -10019,7 +10018,6 @@ class CustomStreamWrapper:
             elif self.received_finish_reason is not None:
                 if self.sent_last_chunk == True:
                     raise StopIteration
-
                 # flush any remaining holding chunk
                 if len(self.holding_chunk) > 0:
                     if model_response.choices[0].delta.content is None:
@@ -10592,16 +10590,18 @@ def trim_messages(
     messages = copy.deepcopy(messages)
     try:
         print_verbose(f"trimming messages")
-        if max_tokens == None:
+        if max_tokens is None:
             # Check if model is valid
             if model in litellm.model_cost:
-                max_tokens_for_model = litellm.model_cost[model]["max_tokens"]
+                max_tokens_for_model = litellm.model_cost[model].get(
+                    "max_input_tokens", litellm.model_cost[model]["max_tokens"]
+                )
                 max_tokens = int(max_tokens_for_model * trim_ratio)
             else:
-                # if user did not specify max tokens
+                # if user did not specify max (input) tokens
                 # or passed an llm litellm does not know
                 # do nothing, just return messages
-                return
+                return messages
 
         system_message = ""
         for message in messages:
