@@ -697,6 +697,21 @@ class ConfigGeneralSettings(LiteLLMBase):
         None,
         description="List of alerting integrations. Today, just slack - `alerting: ['slack']`",
     )
+    alert_types: Optional[
+        List[
+            Literal[
+                "llm_exceptions",
+                "llm_too_slow",
+                "llm_requests_hanging",
+                "budget_alerts",
+                "db_exceptions",
+            ]
+        ]
+    ] = Field(
+        None,
+        description="List of alerting types. By default it is all alerts",
+    )
+
     alerting_threshold: Optional[int] = Field(
         None,
         description="sends alerts if requests hang for 5min+",
@@ -800,6 +815,10 @@ class UserAPIKeyAuth(
     def check_api_key(cls, values):
         if values.get("api_key") is not None:
             values.update({"token": hash_token(values.get("api_key"))})
+            if isinstance(values.get("api_key"), str) and values.get(
+                "api_key"
+            ).startswith("sk-"):
+                values.update({"api_key": hash_token(values.get("api_key"))})
         return values
 
 
