@@ -12,6 +12,7 @@ from typing import Any, Literal, Union, BinaryIO
 from functools import partial
 import dotenv, traceback, random, asyncio, time, contextvars
 from copy import deepcopy
+
 import httpx
 import litellm
 from ._logging import verbose_logger
@@ -1940,9 +1941,16 @@ def completion(
                 or "http://localhost:11434"
             )
 
+            api_key = (
+                api_key
+                or litellm.ollama_key
+                or os.environ.get("OLLAMA_API_KEY")
+                or litellm.api_key
+            )
             ## LOGGING
             generator = ollama_chat.get_ollama_response(
                 api_base,
+                api_key,
                 model,
                 messages,
                 optional_params,
