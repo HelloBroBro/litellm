@@ -2716,23 +2716,22 @@ def client(original_function):
 
             # [OPTIONAL] CHECK CACHE
             print_verbose(
-                f"kwargs[caching]: {kwargs.get('caching', False)}; litellm.cache: {litellm.cache}"
+                f"SYNC kwargs[caching]: {kwargs.get('caching', False)}; litellm.cache: {litellm.cache}; kwargs.get('cache')['no-cache']: {kwargs.get('cache', {}).get('no-cache', False)}"
             )
             # if caching is false or cache["no-cache"]==True, don't run this
             if (
                 (
                     (
-                        kwargs.get("caching", None) is None
-                        and kwargs.get("cache", None) is None
-                        and litellm.cache is not None
+                        (
+                            kwargs.get("caching", None) is None
+                            and litellm.cache is not None
+                        )
+                        or kwargs.get("caching", False) == True
                     )
-                    or kwargs.get("caching", False) == True
-                    or (
-                        kwargs.get("cache", None) is not None
-                        and kwargs.get("cache", {}).get("no-cache", False) != True
-                    )
+                    and kwargs.get("cache", {}).get("no-cache", False) != True
                 )
                 and kwargs.get("aembedding", False) != True
+                and kwargs.get("atext_completion", False) != True
                 and kwargs.get("acompletion", False) != True
                 and kwargs.get("aimg_generation", False) != True
                 and kwargs.get("atranscription", False) != True
@@ -3011,24 +3010,17 @@ def client(original_function):
                     )
 
             # [OPTIONAL] CHECK CACHE
-            print_verbose(f"litellm.cache: {litellm.cache}")
             print_verbose(
-                f"kwargs[caching]: {kwargs.get('caching', False)}; litellm.cache: {litellm.cache}"
+                f"ASYNC kwargs[caching]: {kwargs.get('caching', False)}; litellm.cache: {litellm.cache}; kwargs.get('cache'): {kwargs.get('cache', None)}"
             )
             # if caching is false, don't run this
             final_embedding_cached_response = None
 
             if (
-                (
-                    kwargs.get("caching", None) is None
-                    and kwargs.get("cache", None) is None
-                    and litellm.cache is not None
-                )
+                (kwargs.get("caching", None) is None and litellm.cache is not None)
                 or kwargs.get("caching", False) == True
-                or (
-                    kwargs.get("cache", None) is not None
-                    and kwargs.get("cache").get("no-cache", False) != True
-                )
+            ) and (
+                kwargs.get("cache", {}).get("no-cache", False) != True
             ):  # allow users to control returning cached responses from the completion function
                 # checking cache
                 print_verbose("INSIDE CHECKING CACHE")
@@ -3074,7 +3066,6 @@ def client(original_function):
                             preset_cache_key  # for streaming calls, we need to pass the preset_cache_key
                         )
                         cached_result = litellm.cache.get_cache(*args, **kwargs)
-
                     if cached_result is not None and not isinstance(
                         cached_result, list
                     ):
@@ -5274,7 +5265,9 @@ def get_optional_params(
         if tool_choice is not None:
             optional_params["tool_choice"] = tool_choice
         if response_format is not None:
-            optional_params["response_format"] = tool_choice
+            optional_params["response_format"] = response_format
+        if seed is not None:
+            optional_params["seed"] = seed
 
     elif custom_llm_provider == "openrouter":
         supported_params = get_supported_openai_params(
@@ -5535,6 +5528,7 @@ def get_supported_openai_params(model: str, custom_llm_provider: str):
             "tools",
             "tool_choice",
             "response_format",
+            "seed",
         ]
     elif custom_llm_provider == "cohere":
         return [
@@ -10006,6 +10000,22 @@ class CustomStreamWrapper:
                                                 t.function.arguments = ""
                             _json_delta = delta.model_dump()
                             print_verbose(f"_json_delta: {_json_delta}")
+                            if "role" not in _json_delta or _json_delta["role"] is None:
+                                _json_delta["role"] = (
+                                    "assistant"  # mistral's api returns role as None
+                                )
+                            if "tool_calls" in _json_delta and isinstance(
+                                _json_delta["tool_calls"], list
+                            ):
+                                for tool in _json_delta["tool_calls"]:
+                                    if (
+                                        isinstance(tool, dict)
+                                        and "function" in tool
+                                        and isinstance(tool["function"], dict)
+                                        and ("type" not in tool or tool["type"] is None)
+                                    ):
+                                        # if function returned but type set to None - mistral's api returns type: None
+                                        tool["type"] = "function"
                             model_response.choices[0].delta = Delta(**_json_delta)
                         except Exception as e:
                             traceback.print_exc()
