@@ -403,13 +403,17 @@ export const modelInfoCall = async (
 export const modelMetricsCall = async (
   accessToken: String,
   userID: String,
-  userRole: String
+  userRole: String, 
+  modelGroup: String | null,
 ) => {
   /**
    * Get all models on proxy
    */
   try {
     let url = proxyBaseUrl ? `${proxyBaseUrl}/model/metrics` : `/model/metrics`;
+    if (modelGroup) {
+      url = `${url}?_selected_model_group=${modelGroup}`
+    }
     // message.info("Requesting model data");
     const response = await fetch(url, {
       method: "GET",
@@ -1007,6 +1011,41 @@ export const teamUpdateCall = async (
     // Handle success - you might want to update some state or UI based on the created key
   } catch (error) {
     console.error("Failed to create key:", error);
+    throw error;
+  }
+};
+
+export const modelUpdateCall = async (
+  accessToken: string,
+  formValues: Record<string, any> // Assuming formValues is an object
+) => {
+  try {
+    console.log("Form Values in modelUpateCall:", formValues); // Log the form values before making the API call
+
+    const url = proxyBaseUrl ? `${proxyBaseUrl}/model/update` : `/model/update`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ...formValues, // Include formValues in the request body
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.text();
+      message.error("Failed to update model: " + errorData, 20);
+      console.error("Error update from the server:", errorData);
+      throw new Error("Network response was not ok");
+    }
+    const data = await response.json();
+    console.log("Update model Response:", data);
+    return data;
+    // Handle success - you might want to update some state or UI based on the created key
+  } catch (error) {
+    console.error("Failed to update model:", error);
     throw error;
   }
 };

@@ -106,7 +106,7 @@ import pydantic
 from litellm.proxy._types import *
 from litellm.caching import DualCache, RedisCache
 from litellm.proxy.health_check import perform_health_check
-from litellm.router import LiteLLM_Params, Deployment
+from litellm.router import LiteLLM_Params, Deployment, updateDeployment
 from litellm.router import ModelInfo as RouterModelInfo
 from litellm._logging import verbose_router_logger, verbose_proxy_logger
 from litellm.proxy.auth.handle_jwt import JWTHandler
@@ -2312,7 +2312,7 @@ class ProxyConfig:
                 master_key = litellm.get_secret(master_key)
 
             if master_key is not None and isinstance(master_key, str):
-                litellm_master_key_hash = master_key
+                litellm_master_key_hash = hash_token(master_key)
             ### STORE MODEL IN DB ### feature flag for `/model/new`
             store_model_in_db = general_settings.get("store_model_in_db", False)
             if store_model_in_db is None:
@@ -2521,9 +2521,10 @@ class ProxyConfig:
                         # decode base64
                         decoded_b64 = base64.b64decode(v)
                         # decrypt value
-                        _litellm_params[k] = decrypt_value(
-                            value=decoded_b64, master_key=master_key
-                        )
+                        _value = decrypt_value(value=decoded_b64, master_key=master_key)
+                        # sanity check if string > size 0
+                        if len(_value) > 0:
+                            _litellm_params[k] = _value
                 _litellm_params = LiteLLM_Params(**_litellm_params)
             else:
                 verbose_proxy_logger.error(
@@ -2636,9 +2637,16 @@ class ProxyConfig:
             ]
 
         # router settings
-        if llm_router is not None:
-            _router_settings = config_data.get("router_settings", {})
-            llm_router.update_settings(**_router_settings)
+        if llm_router is not None and prisma_client is not None:
+            db_router_settings = await prisma_client.db.litellm_config.find_first(
+                where={"param_name": "router_settings"}
+            )
+            if (
+                db_router_settings is not None
+                and db_router_settings.param_value is not None
+            ):
+                _router_settings = db_router_settings.param_value
+                llm_router.update_settings(**_router_settings)
 
     async def add_deployment(
         self,
@@ -5977,6 +5985,13 @@ async def user_info(
         ## REMOVE HASHED TOKEN INFO before returning ##
         returned_keys = []
         for key in keys:
+            if (
+                key.token == litellm_master_key_hash
+                and general_settings.get("disable_master_key_return", False)
+                == True  ## [IMPORTANT] used by hosted proxy-ui to prevent sharing master key on ui
+            ):
+                continue
+
             try:
                 key = key.model_dump()  # noqa
             except:
@@ -7236,6 +7251,89 @@ async def add_new_model(
         )
 
 
+#### MODEL MANAGEMENT ####
+@router.post(
+    "/model/update",
+    description="Edit existing model params",
+    tags=["model management"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def update_model(
+    model_params: updateDeployment,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    global llm_router, llm_model_list, general_settings, user_config_file_path, proxy_config, prisma_client, master_key, store_model_in_db, proxy_logging_obj
+    try:
+        import base64
+
+        global prisma_client
+
+        if prisma_client is None:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "No DB Connected. Here's how to do it - https://docs.litellm.ai/docs/proxy/virtual_keys"
+                },
+            )
+        # update DB
+        if store_model_in_db == True:
+            _model_id = None
+            _model_info = getattr(model_params, "model_info", None)
+            if _model_info is None:
+                raise Exception("model_info not provided")
+
+            _model_id = _model_info.id
+            if _model_id is None:
+                raise Exception("model_info.id not provided")
+            _existing_litellm_params = (
+                await prisma_client.db.litellm_proxymodeltable.find_unique(
+                    where={"model_id": _model_id}
+                )
+            )
+            if _existing_litellm_params is None:
+                raise Exception("model not found")
+            _existing_litellm_params_dict = dict(
+                _existing_litellm_params.litellm_params
+            )
+
+            if model_params.litellm_params is None:
+                raise Exception("litellm_params not provided")
+
+            _new_litellm_params_dict = model_params.litellm_params.dict(
+                exclude_none=True
+            )
+
+            for key, value in _existing_litellm_params_dict.items():
+                if key in _new_litellm_params_dict:
+                    _existing_litellm_params_dict[key] = _new_litellm_params_dict[key]
+
+            _data: dict = {
+                "litellm_params": json.dumps(_existing_litellm_params_dict),  # type: ignore
+                "updated_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
+            }
+            model_response = await prisma_client.db.litellm_proxymodeltable.update(
+                where={"model_id": _model_id},
+                data=_data,  # type: ignore
+            )
+    except Exception as e:
+        traceback.print_exc()
+        if isinstance(e, HTTPException):
+            raise ProxyException(
+                message=getattr(e, "detail", f"Authentication Error({str(e)})"),
+                type="auth_error",
+                param=getattr(e, "param", "None"),
+                code=getattr(e, "status_code", status.HTTP_400_BAD_REQUEST),
+            )
+        elif isinstance(e, ProxyException):
+            raise e
+        raise ProxyException(
+            message="Authentication Error, " + str(e),
+            type="auth_error",
+            param=getattr(e, "param", "None"),
+            code=status.HTTP_400_BAD_REQUEST,
+        )
+
+
 @router.get(
     "/v2/model/info",
     description="v2 - returns all the models set on the config.yaml, shows 'user_access' = True if the user has access to the model. Provides more info about each model in /models, including config.yaml descriptions (except api key and api base)",
@@ -7323,8 +7421,11 @@ async def model_info_v2(
 )
 async def model_metrics(
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+    _selected_model_group: Optional[str] = None,
+    startTime: Optional[datetime] = datetime.now() - timedelta(days=30),
+    endTime: Optional[datetime] = datetime.now(),
 ):
-    global prisma_client
+    global prisma_client, llm_router
     if prisma_client is None:
         raise ProxyException(
             message="Prisma Client is not initialized",
@@ -7332,24 +7433,50 @@ async def model_metrics(
             param="None",
             code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
+    if _selected_model_group and llm_router is not None:
+        _model_list = llm_router.get_model_list()
+        _relevant_api_bases = []
+        for model in _model_list:
+            if model["model_name"] == _selected_model_group:
+                _litellm_params = model["litellm_params"]
+                _api_base = _litellm_params.get("api_base", "")
+                _relevant_api_bases.append(_api_base)
+                _relevant_api_bases.append(_api_base + "/openai/")
 
-    sql_query = """
-        SELECT
-            CASE WHEN api_base = '' THEN model ELSE CONCAT(model, '-', api_base) END AS combined_model_api_base,
-            COUNT(*) AS num_requests,
-            AVG(EXTRACT(epoch FROM ("endTime" - "startTime"))) AS avg_latency_seconds
-        FROM
-            "LiteLLM_SpendLogs"
-        WHERE
-            "startTime" >= NOW() - INTERVAL '10000 hours'
-        GROUP BY
-            CASE WHEN api_base = '' THEN model ELSE CONCAT(model, '-', api_base) END
-        ORDER BY
-            num_requests DESC
-        LIMIT 50;
-    """
+        sql_query = """
+            SELECT
+                CASE WHEN api_base = '' THEN model ELSE CONCAT(model, '-', api_base) END AS combined_model_api_base,
+                COUNT(*) AS num_requests,
+                AVG(EXTRACT(epoch FROM ("endTime" - "startTime"))) AS avg_latency_seconds
+            FROM "LiteLLM_SpendLogs"
+            WHERE "startTime" >= $1::timestamp AND "endTime" <= $2::timestamp
+            AND api_base = ANY($3)
+            GROUP BY CASE WHEN api_base = '' THEN model ELSE CONCAT(model, '-', api_base) END
+            ORDER BY num_requests DESC
+            LIMIT 50;
+        """
 
-    db_response = await prisma_client.db.query_raw(query=sql_query)
+        db_response = await prisma_client.db.query_raw(
+            sql_query, startTime, endTime, _relevant_api_bases
+        )
+    else:
+
+        sql_query = """
+            SELECT
+                CASE WHEN api_base = '' THEN model ELSE CONCAT(model, '-', api_base) END AS combined_model_api_base,
+                COUNT(*) AS num_requests,
+                AVG(EXTRACT(epoch FROM ("endTime" - "startTime"))) AS avg_latency_seconds
+            FROM
+                "LiteLLM_SpendLogs"
+            WHERE "startTime" >= $1::timestamp AND "endTime" <= $2::timestamp
+            GROUP BY
+                CASE WHEN api_base = '' THEN model ELSE CONCAT(model, '-', api_base) END
+            ORDER BY
+                num_requests DESC
+            LIMIT 50;
+        """
+
+        db_response = await prisma_client.db.query_raw(sql_query, startTime, endTime)
     response: List[dict] = []
     if response is not None:
         # loop through all models
@@ -8287,96 +8414,29 @@ async def update_config(config_info: ConfigYAML):
     """
     global llm_router, llm_model_list, general_settings, proxy_config, proxy_logging_obj, master_key, prisma_client
     try:
-        import base64
 
-        # Load existing config
-        config = await proxy_config.get_config()
-        verbose_proxy_logger.debug("Loaded config: %s", config)
+        """
+        - Update the ConfigTable DB
+        - Run 'add_deployment'
+        """
+        if prisma_client is None:
+            raise Exception("No DB Connected")
 
-        # update the general settings
-        if config_info.general_settings is not None:
-            config.setdefault("general_settings", {})
-            updated_general_settings = config_info.general_settings.dict(
-                exclude_none=True
+        updated_settings = config_info.json(exclude_none=True)
+        updated_settings = prisma_client.jsonify_object(updated_settings)
+        for k, v in updated_settings.items():
+            await prisma_client.db.litellm_config.upsert(
+                where={"param_name": k},
+                data={
+                    "create": {"param_name": k, "param_value": v},
+                    "update": {"param_value": v},
+                },
             )
 
-            _existing_settings = config["general_settings"]
-            for k, v in updated_general_settings.items():
-                # overwrite existing settings with updated values
-                _existing_settings[k] = v
-            config["general_settings"] = _existing_settings
+        await proxy_config.add_deployment(
+            prisma_client=prisma_client, proxy_logging_obj=proxy_logging_obj
+        )
 
-        if config_info.environment_variables is not None:
-            config.setdefault("environment_variables", {})
-            _updated_environment_variables = config_info.environment_variables
-
-            # encrypt updated_environment_variables #
-            for k, v in _updated_environment_variables.items():
-                if isinstance(v, str):
-                    encrypted_value = encrypt_value(value=v, master_key=master_key)  # type: ignore
-                    _updated_environment_variables[k] = base64.b64encode(
-                        encrypted_value
-                    ).decode("utf-8")
-
-            _existing_env_variables = config["environment_variables"]
-
-            for k, v in _updated_environment_variables.items():
-                # overwrite existing env variables with updated values
-                _existing_env_variables[k] = _updated_environment_variables[k]
-
-        # update the litellm settings
-        if config_info.litellm_settings is not None:
-            config.setdefault("litellm_settings", {})
-            updated_litellm_settings = config_info.litellm_settings
-            config["litellm_settings"] = {
-                **updated_litellm_settings,
-                **config["litellm_settings"],
-            }
-
-            # if litellm.success_callback in updated_litellm_settings and config["litellm_settings"]
-            if (
-                "success_callback" in updated_litellm_settings
-                and "success_callback" in config["litellm_settings"]
-            ):
-
-                # check both success callback are lists
-                if isinstance(
-                    config["litellm_settings"]["success_callback"], list
-                ) and isinstance(updated_litellm_settings["success_callback"], list):
-                    combined_success_callback = (
-                        config["litellm_settings"]["success_callback"]
-                        + updated_litellm_settings["success_callback"]
-                    )
-                    combined_success_callback = list(set(combined_success_callback))
-                    config["litellm_settings"][
-                        "success_callback"
-                    ] = combined_success_callback
-
-        # router settings
-        if config_info.router_settings is not None:
-            config.setdefault("router_settings", {})
-            _updated_router_settings = config_info.router_settings
-
-            config["router_settings"] = {
-                **config["router_settings"],
-                **_updated_router_settings,
-            }
-
-        # Save the updated config
-        await proxy_config.save_config(new_config=config)
-
-        # make sure the change is instantly rolled out for langfuse
-        if prisma_client is not None:
-            await proxy_config.add_deployment(
-                prisma_client=prisma_client, proxy_logging_obj=proxy_logging_obj
-            )
-
-        # Test new connections
-        ## Slack
-        if "slack" in config.get("general_settings", {}).get("alerting", []):
-            await proxy_logging_obj.alerting_handler(
-                message="This is a test", level="Low"
-            )
         return {"message": "Config updated successfully"}
     except Exception as e:
         traceback.print_exc()

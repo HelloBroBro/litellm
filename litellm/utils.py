@@ -75,6 +75,7 @@ from .integrations.prometheus_services import PrometheusServicesLogger
 from .integrations.dynamodb import DyanmoDBLogger
 from .integrations.s3 import S3Logger
 from .integrations.clickhouse import ClickhouseLogger
+from .integrations.greenscale import GreenscaleLogger
 from .integrations.litedebugger import LiteDebugger
 from .proxy._types import KeyManagementSystem
 from openai import OpenAIError as OriginalError
@@ -134,6 +135,7 @@ dynamoLogger = None
 s3Logger = None
 genericAPILogger = None
 clickHouseLogger = None
+greenscaleLogger = None
 lunaryLogger = None
 aispendLogger = None
 berrispendLogger = None
@@ -529,9 +531,6 @@ class ModelResponse(OpenAIObject):
     backend changes have been made that might impact determinism.
     """
 
-    usage: Optional[Usage] = None
-    """Usage statistics for the completion request."""
-
     _hidden_params: dict = {}
 
     def __init__(
@@ -586,20 +585,27 @@ class ModelResponse(OpenAIObject):
         else:
             created = created
         model = model
-        if usage:
+        if usage is not None:
             usage = usage
-        else:
+        elif stream is None or stream == False:
             usage = Usage()
         if hidden_params:
             self._hidden_params = hidden_params
+
+        init_values = {
+            "id": id,
+            "choices": choices,
+            "created": created,
+            "model": model,
+            "object": object,
+            "system_fingerprint": system_fingerprint,
+        }
+
+        if usage is not None:
+            init_values["usage"] = usage
+
         super().__init__(
-            id=id,
-            choices=choices,
-            created=created,
-            model=model,
-            object=object,
-            system_fingerprint=system_fingerprint,
-            usage=usage,
+            **init_values,
             **params,
         )
 
@@ -1742,6 +1748,33 @@ class Logging:
                             start_time=start_time,
                             end_time=end_time,
                             user_id=kwargs.get("user", None),
+                            print_verbose=print_verbose,
+                        )
+                    if callback == "greenscale":
+                        kwargs = {}
+                        for k, v in self.model_call_details.items():
+                            if (
+                                k != "original_response"
+                            ):  # copy.deepcopy raises errors as this could be a coroutine
+                                kwargs[k] = v
+                        # this only logs streaming once, complete_streaming_response exists i.e when stream ends
+                        if self.stream:
+                            verbose_logger.debug(
+                                f"is complete_streaming_response in kwargs: {kwargs.get('complete_streaming_response', None)}"
+                            )
+                            if complete_streaming_response is None:
+                                break
+                            else:
+                                print_verbose(
+                                    "reaches greenscale for streaming logging!"
+                                )
+                                result = kwargs["complete_streaming_response"]
+
+                        greenscaleLogger.log_event(
+                            kwargs=kwargs,
+                            response_obj=result,
+                            start_time=start_time,
+                            end_time=end_time,
                             print_verbose=print_verbose,
                         )
                     if callback == "cache" and litellm.cache is not None:
@@ -5930,6 +5963,7 @@ def get_llm_provider(
             or model in litellm.vertex_code_text_models
             or model in litellm.vertex_language_models
             or model in litellm.vertex_embedding_models
+            or model in litellm.vertex_vision_models
         ):
             custom_llm_provider = "vertex_ai"
         ## ai21
@@ -6542,7 +6576,7 @@ def validate_environment(model: Optional[str] = None) -> dict:
 
 def set_callbacks(callback_list, function_id=None):
 
-    global sentry_sdk_instance, capture_exception, add_breadcrumb, posthog, slack_app, alerts_channel, traceloopLogger, athinaLogger, heliconeLogger, aispendLogger, berrispendLogger, supabaseClient, liteDebuggerClient, lunaryLogger, promptLayerLogger, langFuseLogger, customLogger, weightsBiasesLogger, langsmithLogger, dynamoLogger, s3Logger, dataDogLogger, prometheusLogger
+    global sentry_sdk_instance, capture_exception, add_breadcrumb, posthog, slack_app, alerts_channel, traceloopLogger, athinaLogger, heliconeLogger, aispendLogger, berrispendLogger, supabaseClient, liteDebuggerClient, lunaryLogger, promptLayerLogger, langFuseLogger, customLogger, weightsBiasesLogger, langsmithLogger, dynamoLogger, s3Logger, dataDogLogger, prometheusLogger, greenscaleLogger
 
     try:
         for callback in callback_list:
@@ -6629,6 +6663,9 @@ def set_callbacks(callback_list, function_id=None):
             elif callback == "supabase":
                 print_verbose(f"instantiating supabase")
                 supabaseClient = Supabase()
+            elif callback == "greenscale":
+                greenscaleLogger = GreenscaleLogger()
+                print_verbose("Initialized Greenscale Logger")
             elif callback == "lite_debugger":
                 print_verbose(f"instantiating lite_debugger")
                 if function_id:
@@ -6852,10 +6889,14 @@ async def convert_to_streaming_response_async(response_object: Optional[dict] = 
     model_response_object.choices = choice_list
 
     if "usage" in response_object and response_object["usage"] is not None:
-        model_response_object.usage = Usage(
-            completion_tokens=response_object["usage"].get("completion_tokens", 0),
-            prompt_tokens=response_object["usage"].get("prompt_tokens", 0),
-            total_tokens=response_object["usage"].get("total_tokens", 0),
+        setattr(
+            model_response_object,
+            "usage",
+            Usage(
+                completion_tokens=response_object["usage"].get("completion_tokens", 0),
+                prompt_tokens=response_object["usage"].get("prompt_tokens", 0),
+                total_tokens=response_object["usage"].get("total_tokens", 0),
+            ),
         )
 
     if "id" in response_object:
@@ -6906,6 +6947,7 @@ def convert_to_streaming_response(response_object: Optional[dict] = None):
     model_response_object.choices = choice_list
 
     if "usage" in response_object and response_object["usage"] is not None:
+        setattr(model_response_object, "usage", Usage())
         model_response_object.usage.completion_tokens = response_object["usage"].get("completion_tokens", 0)  # type: ignore
         model_response_object.usage.prompt_tokens = response_object["usage"].get("prompt_tokens", 0)  # type: ignore
         model_response_object.usage.total_tokens = response_object["usage"].get("total_tokens", 0)  # type: ignore
@@ -7382,11 +7424,18 @@ def exception_type(
                 exception_type = type(original_exception).__name__
             else:
                 exception_type = ""
+            _api_base = ""
+            try:
+                _api_base = litellm.get_api_base(
+                    model=model, optional_params=extra_kwargs
+                )
+            except:
+                _api_base = ""
 
             if "Request Timeout Error" in error_str or "Request timed out" in error_str:
                 exception_mapping_worked = True
                 raise Timeout(
-                    message=f"APITimeoutError - Request timed out",
+                    message=f"APITimeoutError - Request timed out. \n model: {model} \n api_base: {_api_base} \n error_str: {error_str}",
                     model=model,
                     llm_provider=custom_llm_provider,
                 )
@@ -9749,6 +9798,7 @@ class CustomStreamWrapper:
                     if response_obj is None:
                         return
                     completion_obj["content"] = response_obj["text"]
+                    setattr(model_response, "usage", Usage())
                     if response_obj.get("prompt_tokens", None) is not None:
                         model_response.usage.prompt_tokens = response_obj[
                             "prompt_tokens"
@@ -10042,6 +10092,7 @@ class CustomStreamWrapper:
                 "content" in completion_obj
                 and isinstance(completion_obj["content"], str)
                 and len(completion_obj["content"]) == 0
+                and hasattr(model_response, "usage")
                 and hasattr(model_response.usage, "prompt_tokens")
             ):
                 if self.sent_first_chunk == False:
