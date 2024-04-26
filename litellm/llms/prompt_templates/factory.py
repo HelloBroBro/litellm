@@ -1346,6 +1346,13 @@ def prompt_factory(
                 return anthropic_pt(messages=messages)
         elif "mistral." in model:
             return mistral_instruct_pt(messages=messages)
+        elif "llama2" in model and "chat" in model:
+            return llama_2_chat_pt(messages=messages)
+        elif "llama3" in model and "instruct" in model:
+            return hf_chat_template(
+                model="meta-llama/Meta-Llama-3-8B-Instruct",
+                messages=messages,
+            )
     elif custom_llm_provider == "perplexity":
         for message in messages:
             message.pop("name", None)
@@ -1355,13 +1362,12 @@ def prompt_factory(
     try:
         if "meta-llama/llama-2" in model and "chat" in model:
             return llama_2_chat_pt(messages=messages)
-        elif "meta-llama/llama-3" in model and "instruct" in model:
+        elif (
+            "meta-llama/llama-3" in model or "meta-llama-3" in model
+        ) and "instruct" in model:
             return hf_chat_template(
-                model=model,
+                model="meta-llama/Meta-Llama-3-8B-Instruct",
                 messages=messages,
-                chat_template=known_tokenizer_config[  # type: ignore
-                    "meta-llama/Meta-Llama-3-8B-Instruct"
-                ]["tokenizer"]["chat_template"],
             )
         elif (
             "tiiuae/falcon" in model

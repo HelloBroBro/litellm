@@ -2632,9 +2632,17 @@ class ProxyConfig:
         if "alert_types" in _general_settings:
             general_settings["alert_types"] = _general_settings["alert_types"]
             proxy_logging_obj.alert_types = general_settings["alert_types"]
-            proxy_logging_obj.slack_alerting_instance.alert_types = general_settings[
-                "alert_types"
+            proxy_logging_obj.slack_alerting_instance.update_values(
+                alert_types=general_settings["alert_types"]
+            )
+
+        if "alert_to_webhook_url" in _general_settings:
+            general_settings["alert_to_webhook_url"] = _general_settings[
+                "alert_to_webhook_url"
             ]
+            proxy_logging_obj.slack_alerting_instance.update_values(
+                alert_to_webhook_url=general_settings["alert_to_webhook_url"]
+            )
 
         # router settings
         if llm_router is not None and prisma_client is not None:
@@ -3654,6 +3662,17 @@ async def chat_completion(
         # get the actual model name
         if data["model"] in litellm.model_alias_map:
             data["model"] = litellm.model_alias_map[data["model"]]
+
+        ## LOGGING OBJECT ## - initialize logging object for logging success/failure events for call
+        data["litellm_call_id"] = str(uuid.uuid4())
+        logging_obj, data = litellm.utils.function_setup(
+            original_function="acompletion",
+            rules_obj=litellm.utils.Rules(),
+            start_time=datetime.now(),
+            **data,
+        )
+
+        data["litellm_logging_obj"] = logging_obj
 
         ### CALL HOOKS ### - modify incoming data before calling the model
         data = await proxy_logging_obj.pre_call_hook(
@@ -8414,6 +8433,7 @@ async def update_config(config_info: ConfigYAML):
     """
     global llm_router, llm_model_list, general_settings, proxy_config, proxy_logging_obj, master_key, prisma_client
     try:
+        import base64
 
         """
         - Update the ConfigTable DB
@@ -8425,13 +8445,84 @@ async def update_config(config_info: ConfigYAML):
         updated_settings = config_info.json(exclude_none=True)
         updated_settings = prisma_client.jsonify_object(updated_settings)
         for k, v in updated_settings.items():
-            await prisma_client.db.litellm_config.upsert(
-                where={"param_name": k},
-                data={
-                    "create": {"param_name": k, "param_value": v},
-                    "update": {"param_value": v},
-                },
+            if k == "router_settings":
+                await prisma_client.db.litellm_config.upsert(
+                    where={"param_name": k},
+                    data={
+                        "create": {"param_name": k, "param_value": v},
+                        "update": {"param_value": v},
+                    },
+                )
+
+        ### OLD LOGIC [TODO] MOVE TO DB ###
+
+        import base64
+
+        # Load existing config
+        config = await proxy_config.get_config()
+        verbose_proxy_logger.debug("Loaded config: %s", config)
+
+        # update the general settings
+        if config_info.general_settings is not None:
+            config.setdefault("general_settings", {})
+            updated_general_settings = config_info.general_settings.dict(
+                exclude_none=True
             )
+
+            _existing_settings = config["general_settings"]
+            for k, v in updated_general_settings.items():
+                # overwrite existing settings with updated values
+                _existing_settings[k] = v
+            config["general_settings"] = _existing_settings
+
+        if config_info.environment_variables is not None:
+            config.setdefault("environment_variables", {})
+            _updated_environment_variables = config_info.environment_variables
+
+            # encrypt updated_environment_variables #
+            for k, v in _updated_environment_variables.items():
+                if isinstance(v, str):
+                    encrypted_value = encrypt_value(value=v, master_key=master_key)  # type: ignore
+                    _updated_environment_variables[k] = base64.b64encode(
+                        encrypted_value
+                    ).decode("utf-8")
+
+            _existing_env_variables = config["environment_variables"]
+
+            for k, v in _updated_environment_variables.items():
+                # overwrite existing env variables with updated values
+                _existing_env_variables[k] = _updated_environment_variables[k]
+
+        # update the litellm settings
+        if config_info.litellm_settings is not None:
+            config.setdefault("litellm_settings", {})
+            updated_litellm_settings = config_info.litellm_settings
+            config["litellm_settings"] = {
+                **updated_litellm_settings,
+                **config["litellm_settings"],
+            }
+
+            # if litellm.success_callback in updated_litellm_settings and config["litellm_settings"]
+            if (
+                "success_callback" in updated_litellm_settings
+                and "success_callback" in config["litellm_settings"]
+            ):
+
+                # check both success callback are lists
+                if isinstance(
+                    config["litellm_settings"]["success_callback"], list
+                ) and isinstance(updated_litellm_settings["success_callback"], list):
+                    combined_success_callback = (
+                        config["litellm_settings"]["success_callback"]
+                        + updated_litellm_settings["success_callback"]
+                    )
+                    combined_success_callback = list(set(combined_success_callback))
+                    config["litellm_settings"][
+                        "success_callback"
+                    ] = combined_success_callback
+
+        # Save the updated config
+        await proxy_config.save_config(new_config=config)
 
         await proxy_config.add_deployment(
             prisma_client=prisma_client, proxy_logging_obj=proxy_logging_obj
@@ -8520,6 +8611,7 @@ async def get_config():
 
         # Check if slack alerting is on
         _alerting = _general_settings.get("alerting", [])
+        alerting_data = []
         if "slack" in _alerting:
             _slack_vars = [
                 "SLACK_WEBHOOK_URL",
@@ -8528,7 +8620,8 @@ async def get_config():
             for _var in _slack_vars:
                 env_variable = environment_variables.get(_var, None)
                 if env_variable is None:
-                    _slack_env_vars[_var] = None
+                    _value = os.getenv("SLACK_WEBHOOK_URL", None)
+                    _slack_env_vars[_var] = _value
                 else:
                     # decode + decrypt the value
                     decoded_b64 = base64.b64decode(env_variable)
@@ -8541,19 +8634,23 @@ async def get_config():
             _all_alert_types = (
                 proxy_logging_obj.slack_alerting_instance._all_possible_alert_types()
             )
-            _data_to_return.append(
+            _alerts_to_webhook = (
+                proxy_logging_obj.slack_alerting_instance.alert_to_webhook_url
+            )
+            alerting_data.append(
                 {
                     "name": "slack",
                     "variables": _slack_env_vars,
-                    "alerting_types": _alerting_types,
-                    "all_alert_types": _all_alert_types,
+                    "active_alerts": _alerting_types,
+                    "alerts_to_webhook": _alerts_to_webhook,
                 }
             )
 
         _router_settings = llm_router.get_settings()
         return {
             "status": "success",
-            "data": _data_to_return,
+            "callbacks": _data_to_return,
+            "alerts": alerting_data,
             "router_settings": _router_settings,
         }
     except Exception as e:
@@ -8670,8 +8767,51 @@ async def health_services_endpoint(
             }
 
         if "slack" in general_settings.get("alerting", []):
-            test_message = f"""\n🚨 `ProjectedLimitExceededError` 💸\n\n`Key Alias:` litellm-ui-test-alert \n`Expected Day of Error`: 28th March \n`Current Spend`: $100.00 \n`Projected Spend at end of month`: $1000.00 \n`Soft Limit`: $700"""
-            await proxy_logging_obj.alerting_handler(message=test_message, level="Low")
+            # test_message = f"""\n🚨 `ProjectedLimitExceededError` 💸\n\n`Key Alias:` litellm-ui-test-alert \n`Expected Day of Error`: 28th March \n`Current Spend`: $100.00 \n`Projected Spend at end of month`: $1000.00 \n`Soft Limit`: $700"""
+            # check if user has opted into unique_alert_webhooks
+            if (
+                proxy_logging_obj.slack_alerting_instance.alert_to_webhook_url
+                is not None
+            ):
+                for (
+                    alert_type
+                ) in proxy_logging_obj.slack_alerting_instance.alert_to_webhook_url:
+                    """
+                    "llm_exceptions",
+                    "llm_too_slow",
+                    "llm_requests_hanging",
+                    "budget_alerts",
+                    "db_exceptions",
+                    """
+                    # only test alert if it's in active alert types
+                    if (
+                        proxy_logging_obj.slack_alerting_instance.alert_types
+                        is not None
+                        and alert_type
+                        not in proxy_logging_obj.slack_alerting_instance.alert_types
+                    ):
+                        continue
+                    test_message = "default test message"
+                    if alert_type == "llm_exceptions":
+                        test_message = f"LLM Exception test alert"
+                    elif alert_type == "llm_too_slow":
+                        test_message = f"LLM Too Slow test alert"
+                    elif alert_type == "llm_requests_hanging":
+                        test_message = f"LLM Requests Hanging test alert"
+                    elif alert_type == "budget_alerts":
+                        test_message = f"Budget Alert test alert"
+                    elif alert_type == "db_exceptions":
+                        test_message = f"DB Exception test alert"
+
+                    await proxy_logging_obj.alerting_handler(
+                        message=test_message, level="Low", alert_type=alert_type
+                    )
+            else:
+                await proxy_logging_obj.alerting_handler(
+                    message="This is a test slack alert message",
+                    level="Low",
+                    alert_type="budget_alerts",
+                )
             return {
                 "status": "success",
                 "message": "Mock Slack Alert sent, verify Slack Alert Received on your channel",
@@ -8689,7 +8829,7 @@ async def health_services_endpoint(
                 message=getattr(e, "detail", f"Authentication Error({str(e)})"),
                 type="auth_error",
                 param=getattr(e, "param", "None"),
-                code=getattr(e, "status_code", status.HTTP_401_UNAUTHORIZED),
+                code=getattr(e, "status_code", status.HTTP_500_INTERNAL_SERVER_ERROR),
             )
         elif isinstance(e, ProxyException):
             raise e
@@ -8697,7 +8837,7 @@ async def health_services_endpoint(
             message="Authentication Error, " + str(e),
             type="auth_error",
             param=getattr(e, "param", "None"),
-            code=status.HTTP_401_UNAUTHORIZED,
+            code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
