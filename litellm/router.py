@@ -375,7 +375,9 @@ class Router:
         except Exception as e:
             raise e
 
-    def _completion(self, model: str, messages: List[Dict[str, str]], **kwargs):
+    def _completion(
+        self, model: str, messages: List[Dict[str, str]], **kwargs
+    ) -> Union[ModelResponse, CustomStreamWrapper]:
         model_name = None
         try:
             # pick the one that is available (lowest TPM/RPM)
@@ -438,7 +440,9 @@ class Router:
             )
             raise e
 
-    async def acompletion(self, model: str, messages: List[Dict[str, str]], **kwargs):
+    async def acompletion(
+        self, model: str, messages: List[Dict[str, str]], **kwargs
+    ) -> Union[ModelResponse, CustomStreamWrapper]:
         try:
             kwargs["model"] = model
             kwargs["messages"] = messages
@@ -454,7 +458,9 @@ class Router:
         except Exception as e:
             raise e
 
-    async def _acompletion(self, model: str, messages: List[Dict[str, str]], **kwargs):
+    async def _acompletion(
+        self, model: str, messages: List[Dict[str, str]], **kwargs
+    ) -> Union[ModelResponse, CustomStreamWrapper]:
         """
         - Get an available deployment
         - call it with a semaphore over the call
@@ -2669,13 +2675,18 @@ class Router:
             "cooldown_time",
         ]
 
+        _existing_router_settings = self.get_settings()
         for var in kwargs:
             if var in _allowed_settings:
                 if var in _int_settings:
                     _casted_value = int(kwargs[var])
                     setattr(self, var, _casted_value)
                 else:
-                    if var == "routing_strategy":
+                    # only run routing strategy init if it has changed
+                    if (
+                        var == "routing_strategy"
+                        and _existing_router_settings["routing_strategy"] != kwargs[var]
+                    ):
                         self.routing_strategy_init(
                             routing_strategy=kwargs[var],
                             routing_strategy_args=kwargs.get(
