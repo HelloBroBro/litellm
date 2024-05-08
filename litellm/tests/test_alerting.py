@@ -1,7 +1,7 @@
 # What is this?
 ## Tests slack alerting on proxy logging object
 
-import sys
+import sys, json
 import os
 import io, asyncio
 from datetime import datetime, timedelta
@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 # logging.basicConfig(level=logging.DEBUG)
 sys.path.insert(0, os.path.abspath("../.."))
 from litellm.proxy.utils import ProxyLogging
-from litellm.caching import DualCache
+from litellm.caching import DualCache, RedisCache
 import litellm
 import pytest
 import asyncio
@@ -18,6 +18,10 @@ from unittest.mock import patch, MagicMock
 from litellm.utils import get_api_base
 from litellm.caching import DualCache
 from litellm.integrations.slack_alerting import SlackAlerting, DeploymentMetrics
+import unittest.mock
+from unittest.mock import AsyncMock
+import pytest
+from litellm.router import AlertingConfig, Router
 
 
 @pytest.mark.parametrize(
@@ -273,3 +277,85 @@ async def test_daily_reports_completion(slack_alerting):
         assert response_val == True
 
         mock_send_alert.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_daily_reports_redis_cache_scheduler():
+    redis_cache = RedisCache()
+    slack_alerting = SlackAlerting(
+        internal_usage_cache=DualCache(redis_cache=redis_cache)
+    )
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "gpt-5",
+                "litellm_params": {
+                    "model": "gpt-3.5-turbo",
+                },
+            }
+        ]
+    )
+
+    with patch.object(
+        slack_alerting, "send_alert", new=AsyncMock()
+    ) as mock_send_alert, patch.object(
+        redis_cache, "async_set_cache", new=AsyncMock()
+    ) as mock_redis_set_cache:
+        # initial call - expect empty
+        await slack_alerting._run_scheduler_helper(llm_router=router)
+
+        try:
+            json.dumps(mock_redis_set_cache.call_args[0][1])
+        except Exception as e:
+            pytest.fail(
+                "Cache value can't be json dumped - {}".format(
+                    mock_redis_set_cache.call_args[0][1]
+                )
+            )
+
+        mock_redis_set_cache.assert_awaited_once()
+
+        # second call - expect empty
+        await slack_alerting._run_scheduler_helper(llm_router=router)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip(reason="Local test. Test if slack alerts are sent.")
+async def test_send_llm_exception_to_slack():
+    from litellm.router import AlertingConfig
+
+    # on async success
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "gpt-3.5-turbo",
+                "litellm_params": {
+                    "model": "gpt-3.5-turbo",
+                    "api_key": "bad_key",
+                },
+            },
+            {
+                "model_name": "gpt-5-good",
+                "litellm_params": {
+                    "model": "gpt-3.5-turbo",
+                },
+            },
+        ],
+        alerting_config=AlertingConfig(
+            alerting_threshold=0.5, webhook_url=os.getenv("SLACK_WEBHOOK_URL")
+        ),
+    )
+    try:
+        await router.acompletion(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": "Hey, how's it going?"}],
+        )
+    except:
+        pass
+
+    await router.acompletion(
+        model="gpt-5-good",
+        messages=[{"role": "user", "content": "Hey, how's it going?"}],
+    )
+
+    await asyncio.sleep(3)

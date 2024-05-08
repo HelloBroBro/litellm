@@ -227,6 +227,10 @@ class UserAPIKeyCacheTTLEnum(enum.Enum):
     global_proxy_spend = 60
 
 
+class SpecialModelNames(enum.Enum):
+    all_team_models = "all-team-models"
+
+
 @app.exception_handler(ProxyException)
 async def openai_exception_handler(request: Request, exc: ProxyException):
     # NOTE: DO NOT MODIFY THIS, its crucial to map to Openai exceptions
@@ -2512,20 +2516,21 @@ class ProxyConfig:
         router = litellm.Router(**router_params)  # type:ignore
         return router, model_list, general_settings
 
-    def get_model_info_with_id(self, model) -> RouterModelInfo:
+    def get_model_info_with_id(self, model, db_model=False) -> RouterModelInfo:
         """
         Common logic across add + delete router models
         Parameters:
         - deployment
+        - db_model -> flag for differentiating model stored in db vs. config -> used on UI
 
         Return model info w/ id
         """
         if model.model_info is not None and isinstance(model.model_info, dict):
             if "id" not in model.model_info:
                 model.model_info["id"] = model.model_id
-            _model_info = RouterModelInfo(**model.model_info)
+            _model_info = RouterModelInfo(**model.model_info, db_model=db_model)
         else:
-            _model_info = RouterModelInfo(id=model.model_id)
+            _model_info = RouterModelInfo(id=model.model_id, db_model=db_model)
         return _model_info
 
     async def _delete_deployment(self, db_models: list) -> int:
@@ -2620,7 +2625,9 @@ class ProxyConfig:
                     f"Invalid model added to proxy db. Invalid litellm params. litellm_params={_litellm_params}"
                 )
                 continue  # skip to next model
-            _model_info = self.get_model_info_with_id(model=m)
+            _model_info = self.get_model_info_with_id(
+                model=m, db_model=True
+            )  ## 👈 FLAG = True for db_models
 
             added = llm_router.add_deployment(
                 deployment=Deployment(
@@ -3160,7 +3167,9 @@ def data_generator(response):
             yield f"data: {json.dumps(chunk)}\n\n"
 
 
-async def async_data_generator(response, user_api_key_dict):
+async def async_data_generator(
+    response, user_api_key_dict: UserAPIKeyAuth, request_data: dict
+):
     verbose_proxy_logger.debug("inside generator")
     try:
         start_time = time.time()
@@ -3177,7 +3186,9 @@ async def async_data_generator(response, user_api_key_dict):
     except Exception as e:
         traceback.print_exc()
         await proxy_logging_obj.post_call_failure_hook(
-            user_api_key_dict=user_api_key_dict, original_exception=e
+            user_api_key_dict=user_api_key_dict,
+            original_exception=e,
+            request_data=request_data,
         )
         verbose_proxy_logger.debug(
             f"\033[1;31mAn error occurred: {e}\n\n Debug this by setting `--debug`, e.g. `litellm --model gpt-3.5-turbo --debug`"
@@ -3202,8 +3213,14 @@ async def async_data_generator(response, user_api_key_dict):
         yield f"data: {error_returned}\n\n"
 
 
-def select_data_generator(response, user_api_key_dict):
-    return async_data_generator(response=response, user_api_key_dict=user_api_key_dict)
+def select_data_generator(
+    response, user_api_key_dict: UserAPIKeyAuth, request_data: dict
+):
+    return async_data_generator(
+        response=response,
+        user_api_key_dict=user_api_key_dict,
+        request_data=request_data,
+    )
 
 
 def get_litellm_model_info(model: dict = {}):
@@ -3436,7 +3453,9 @@ def model_list(
     all_models = []
     if len(user_api_key_dict.models) > 0:
         all_models = user_api_key_dict.models
-    else:
+        if SpecialModelNames.all_team_models.value in all_models:
+            all_models = user_api_key_dict.team_models
+    if len(all_models) == 0:  # has all proxy models
         ## if no specific model access
         if general_settings.get("infer_model_from_keys", False):
             all_models = litellm.utils.get_valid_models()
@@ -3496,9 +3515,8 @@ async def chat_completion(
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
     global general_settings, user_debug, proxy_logging_obj, llm_model_list
+    data = {}
     try:
-        # async with llm_router.sem
-        data = {}
         body = await request.body()
         body_str = body.decode()
         try:
@@ -3689,7 +3707,9 @@ async def chat_completion(
                 "x-litellm-model-api-base": api_base,
             }
             selected_data_generator = select_data_generator(
-                response=response, user_api_key_dict=user_api_key_dict
+                response=response,
+                user_api_key_dict=user_api_key_dict,
+                request_data=data,
             )
             return StreamingResponse(
                 selected_data_generator,
@@ -3711,7 +3731,7 @@ async def chat_completion(
         data["litellm_status"] = "fail"  # used for alerting
         traceback.print_exc()
         await proxy_logging_obj.post_call_failure_hook(
-            user_api_key_dict=user_api_key_dict, original_exception=e
+            user_api_key_dict=user_api_key_dict, original_exception=e, request_data=data
         )
         verbose_proxy_logger.debug(
             f"\033[1;31mAn error occurred: {e}\n\n Debug this by setting `--debug`, e.g. `litellm --model gpt-3.5-turbo --debug`"
@@ -3873,7 +3893,9 @@ async def completion(
                 "x-litellm-model-id": model_id,
             }
             selected_data_generator = select_data_generator(
-                response=response, user_api_key_dict=user_api_key_dict
+                response=response,
+                user_api_key_dict=user_api_key_dict,
+                request_data=data,
             )
 
             return StreamingResponse(
@@ -3926,6 +3948,7 @@ async def embeddings(
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
     global proxy_logging_obj
+    data: Any = {}
     try:
         # Use orjson to parse JSON data, orjson speeds up requests significantly
         body = await request.body()
@@ -4071,7 +4094,7 @@ async def embeddings(
     except Exception as e:
         data["litellm_status"] = "fail"  # used for alerting
         await proxy_logging_obj.post_call_failure_hook(
-            user_api_key_dict=user_api_key_dict, original_exception=e
+            user_api_key_dict=user_api_key_dict, original_exception=e, request_data=data
         )
         traceback.print_exc()
         if isinstance(e, HTTPException):
@@ -4108,6 +4131,7 @@ async def image_generation(
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
     global proxy_logging_obj
+    data = {}
     try:
         # Use orjson to parse JSON data, orjson speeds up requests significantly
         body = await request.body()
@@ -4227,7 +4251,7 @@ async def image_generation(
     except Exception as e:
         data["litellm_status"] = "fail"  # used for alerting
         await proxy_logging_obj.post_call_failure_hook(
-            user_api_key_dict=user_api_key_dict, original_exception=e
+            user_api_key_dict=user_api_key_dict, original_exception=e, request_data=data
         )
         traceback.print_exc()
         if isinstance(e, HTTPException):
@@ -4268,10 +4292,11 @@ async def audio_transcriptions(
     https://platform.openai.com/docs/api-reference/audio/createTranscription?lang=curl
     """
     global proxy_logging_obj
+    data: Dict = {}
     try:
         # Use orjson to parse JSON data, orjson speeds up requests significantly
         form_data = await request.form()
-        data: Dict = {key: value for key, value in form_data.items() if key != "file"}
+        data = {key: value for key, value in form_data.items() if key != "file"}
 
         # Include original request and headers in the data
         data["proxy_server_request"] = {  # type: ignore
@@ -4406,7 +4431,7 @@ async def audio_transcriptions(
     except Exception as e:
         data["litellm_status"] = "fail"  # used for alerting
         await proxy_logging_obj.post_call_failure_hook(
-            user_api_key_dict=user_api_key_dict, original_exception=e
+            user_api_key_dict=user_api_key_dict, original_exception=e, request_data=data
         )
         traceback.print_exc()
         if isinstance(e, HTTPException):
@@ -4455,6 +4480,7 @@ async def moderations(
     ```
     """
     global proxy_logging_obj
+    data: Dict = {}
     try:
         # Use orjson to parse JSON data, orjson speeds up requests significantly
         body = await request.body()
@@ -4568,7 +4594,7 @@ async def moderations(
     except Exception as e:
         data["litellm_status"] = "fail"  # used for alerting
         await proxy_logging_obj.post_call_failure_hook(
-            user_api_key_dict=user_api_key_dict, original_exception=e
+            user_api_key_dict=user_api_key_dict, original_exception=e, request_data=data
         )
         traceback.print_exc()
         if isinstance(e, HTTPException):
@@ -5918,6 +5944,7 @@ async def new_user(data: NewUserRequest):
         models=response.get("models", None),
         tpm_limit=response.get("tpm_limit", None),
         rpm_limit=response.get("rpm_limit", None),
+        budget_duration=response.get("budget_duration", None),
     )
 
 
@@ -7425,6 +7452,16 @@ async def update_model(
                 )
             )
             if _existing_litellm_params is None:
+                if (
+                    llm_router is not None
+                    and llm_router.get_deployment(model_id=_model_id) is not None
+                ):
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "error": "Can't edit model. Model in config. Store model in db via `/model/new`. to edit."
+                        },
+                    )
                 raise Exception("model not found")
             _existing_litellm_params_dict = dict(
                 _existing_litellm_params.litellm_params
@@ -7999,8 +8036,8 @@ async def async_queue_request(
 
     Now using a FastAPI background task + /chat/completions compatible endpoint
     """
+    data = {}
     try:
-        data = {}
         data = await request.json()  # type: ignore
 
         # Include original request and headers in the data
@@ -8065,7 +8102,9 @@ async def async_queue_request(
         ):  # use generate_responses to stream responses
             return StreamingResponse(
                 async_data_generator(
-                    user_api_key_dict=user_api_key_dict, response=response
+                    user_api_key_dict=user_api_key_dict,
+                    response=response,
+                    request_data=data,
                 ),
                 media_type="text/event-stream",
             )
@@ -8073,7 +8112,7 @@ async def async_queue_request(
         return response
     except Exception as e:
         await proxy_logging_obj.post_call_failure_hook(
-            user_api_key_dict=user_api_key_dict, original_exception=e
+            user_api_key_dict=user_api_key_dict, original_exception=e, request_data=data
         )
         if isinstance(e, HTTPException):
             raise ProxyException(
