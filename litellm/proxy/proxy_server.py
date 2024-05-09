@@ -30,7 +30,7 @@ sys.path.insert(
 try:
     import fastapi
     import backoff
-    import yaml
+    import yaml  # type: ignore
     import orjson
     import logging
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -2528,7 +2528,10 @@ class ProxyConfig:
         if model.model_info is not None and isinstance(model.model_info, dict):
             if "id" not in model.model_info:
                 model.model_info["id"] = model.model_id
-            _model_info = RouterModelInfo(**model.model_info, db_model=db_model)
+            if "db_model" in model.model_info and model.model_info["db_model"] == False:
+                model.model_info["db_model"] = db_model
+            _model_info = RouterModelInfo(**model.model_info)
+
         else:
             _model_info = RouterModelInfo(id=model.model_id, db_model=db_model)
         return _model_info
@@ -2613,7 +2616,13 @@ class ProxyConfig:
                 for k, v in _litellm_params.items():
                     if isinstance(v, str):
                         # decode base64
-                        decoded_b64 = base64.b64decode(v)
+                        try:
+                            decoded_b64 = base64.b64decode(v)
+                        except Exception as e:
+                            verbose_proxy_logger.error(
+                                "Error decoding value - {}".format(v)
+                            )
+                            continue
                         # decrypt value
                         _value = decrypt_value(value=decoded_b64, master_key=master_key)
                         # sanity check if string > size 0
@@ -2629,7 +2638,7 @@ class ProxyConfig:
                 model=m, db_model=True
             )  ## 👈 FLAG = True for db_models
 
-            added = llm_router.add_deployment(
+            added = llm_router.upsert_deployment(
                 deployment=Deployment(
                     model_name=m.model_name,
                     litellm_params=_litellm_params,
@@ -3491,6 +3500,11 @@ def model_list(
     tags=["chat/completions"],
 )
 @router.post(
+    "/engines/{model:path}/chat/completions",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["chat/completions"],
+)
+@router.post(
     "/openai/deployments/{model:path}/chat/completions",
     dependencies=[Depends(user_api_key_auth)],
     tags=["chat/completions"],
@@ -3705,6 +3719,7 @@ async def chat_completion(
                 "x-litellm-model-id": model_id,
                 "x-litellm-cache-key": cache_key,
                 "x-litellm-model-api-base": api_base,
+                "x-litellm-version": version,
             }
             selected_data_generator = select_data_generator(
                 response=response,
@@ -3720,6 +3735,7 @@ async def chat_completion(
         fastapi_response.headers["x-litellm-model-id"] = model_id
         fastapi_response.headers["x-litellm-cache-key"] = cache_key
         fastapi_response.headers["x-litellm-model-api-base"] = api_base
+        fastapi_response.headers["x-litellm-version"] = version
 
         ### CALL HOOKS ### - modify outgoing data
         response = await proxy_logging_obj.post_call_success_hook(
@@ -3876,14 +3892,10 @@ async def completion(
                 },
             )
 
-        if hasattr(response, "_hidden_params"):
-            model_id = response._hidden_params.get("model_id", None) or ""
-            original_response = (
-                response._hidden_params.get("original_response", None) or ""
-            )
-        else:
-            model_id = ""
-            original_response = ""
+        hidden_params = getattr(response, "_hidden_params", {}) or {}
+        model_id = hidden_params.get("model_id", None) or ""
+        cache_key = hidden_params.get("cache_key", None) or ""
+        api_base = hidden_params.get("api_base", None) or ""
 
         verbose_proxy_logger.debug("final response: %s", response)
         if (
@@ -3891,6 +3903,9 @@ async def completion(
         ):  # use generate_responses to stream responses
             custom_headers = {
                 "x-litellm-model-id": model_id,
+                "x-litellm-cache-key": cache_key,
+                "x-litellm-model-api-base": api_base,
+                "x-litellm-version": version,
             }
             selected_data_generator = select_data_generator(
                 response=response,
@@ -3905,6 +3920,10 @@ async def completion(
             )
 
         fastapi_response.headers["x-litellm-model-id"] = model_id
+        fastapi_response.headers["x-litellm-cache-key"] = cache_key
+        fastapi_response.headers["x-litellm-model-api-base"] = api_base
+        fastapi_response.headers["x-litellm-version"] = version
+
         return response
     except Exception as e:
         data["litellm_status"] = "fail"  # used for alerting
@@ -3944,6 +3963,7 @@ async def completion(
 )  # azure compatible endpoint
 async def embeddings(
     request: Request,
+    fastapi_response: Response,
     model: Optional[str] = None,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
@@ -4090,6 +4110,17 @@ async def embeddings(
         ### ALERTING ###
         data["litellm_status"] = "success"  # used for alerting
 
+        ### RESPONSE HEADERS ###
+        hidden_params = getattr(response, "_hidden_params", {}) or {}
+        model_id = hidden_params.get("model_id", None) or ""
+        cache_key = hidden_params.get("cache_key", None) or ""
+        api_base = hidden_params.get("api_base", None) or ""
+
+        fastapi_response.headers["x-litellm-model-id"] = model_id
+        fastapi_response.headers["x-litellm-cache-key"] = cache_key
+        fastapi_response.headers["x-litellm-model-api-base"] = api_base
+        fastapi_response.headers["x-litellm-version"] = version
+
         return response
     except Exception as e:
         data["litellm_status"] = "fail"  # used for alerting
@@ -4128,6 +4159,7 @@ async def embeddings(
 )
 async def image_generation(
     request: Request,
+    fastapi_response: Response,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
     global proxy_logging_obj
@@ -4247,6 +4279,17 @@ async def image_generation(
         ### ALERTING ###
         data["litellm_status"] = "success"  # used for alerting
 
+        ### RESPONSE HEADERS ###
+        hidden_params = getattr(response, "_hidden_params", {}) or {}
+        model_id = hidden_params.get("model_id", None) or ""
+        cache_key = hidden_params.get("cache_key", None) or ""
+        api_base = hidden_params.get("api_base", None) or ""
+
+        fastapi_response.headers["x-litellm-model-id"] = model_id
+        fastapi_response.headers["x-litellm-cache-key"] = cache_key
+        fastapi_response.headers["x-litellm-model-api-base"] = api_base
+        fastapi_response.headers["x-litellm-version"] = version
+
         return response
     except Exception as e:
         data["litellm_status"] = "fail"  # used for alerting
@@ -4283,6 +4326,7 @@ async def image_generation(
 )
 async def audio_transcriptions(
     request: Request,
+    fastapi_response: Response,
     file: UploadFile = File(...),
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
@@ -4427,6 +4471,18 @@ async def audio_transcriptions(
 
         ### ALERTING ###
         data["litellm_status"] = "success"  # used for alerting
+
+        ### RESPONSE HEADERS ###
+        hidden_params = getattr(response, "_hidden_params", {}) or {}
+        model_id = hidden_params.get("model_id", None) or ""
+        cache_key = hidden_params.get("cache_key", None) or ""
+        api_base = hidden_params.get("api_base", None) or ""
+
+        fastapi_response.headers["x-litellm-model-id"] = model_id
+        fastapi_response.headers["x-litellm-cache-key"] = cache_key
+        fastapi_response.headers["x-litellm-model-api-base"] = api_base
+        fastapi_response.headers["x-litellm-version"] = version
+
         return response
     except Exception as e:
         data["litellm_status"] = "fail"  # used for alerting
@@ -4466,6 +4522,7 @@ async def audio_transcriptions(
 )
 async def moderations(
     request: Request,
+    fastapi_response: Response,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
     """
@@ -4589,6 +4646,17 @@ async def moderations(
 
         ### ALERTING ###
         data["litellm_status"] = "success"  # used for alerting
+
+        ### RESPONSE HEADERS ###
+        hidden_params = getattr(response, "_hidden_params", {}) or {}
+        model_id = hidden_params.get("model_id", None) or ""
+        cache_key = hidden_params.get("cache_key", None) or ""
+        api_base = hidden_params.get("api_base", None) or ""
+
+        fastapi_response.headers["x-litellm-model-id"] = model_id
+        fastapi_response.headers["x-litellm-cache-key"] = cache_key
+        fastapi_response.headers["x-litellm-model-api-base"] = api_base
+        fastapi_response.headers["x-litellm-version"] = version
 
         return response
     except Exception as e:
@@ -5795,35 +5863,38 @@ async def global_spend_end_users(data: Optional[GlobalEndUsersSpend] = None):
     if prisma_client is None:
         raise HTTPException(status_code=500, detail={"error": "No db connected"})
 
-    if data is None:
-        sql_query = f"""SELECT * FROM "Last30dTopEndUsersSpend";"""
+    """
+    Gets the top 100 end-users for a given api key
+    """
+    startTime = None
+    endTime = None
+    selected_api_key = None
+    if data is not None:
+        startTime = data.startTime
+        endTime = data.endTime
+        selected_api_key = data.api_key
 
-        response = await prisma_client.db.query_raw(query=sql_query)
-    else:
-        """
-        Gets the top 100 end-users for a given api key
-        """
-        current_date = datetime.now()
-        past_date = current_date - timedelta(days=30)
-        response = await prisma_client.db.litellm_spendlogs.group_by(  # type: ignore
-            by=["end_user"],
-            where={
-                "AND": [{"startTime": {"gte": past_date}}, {"api_key": data.api_key}]  # type: ignore
-            },
-            sum={"spend": True},
-            order={"_sum": {"spend": "desc"}},  # type: ignore
-            take=100,
-            count=True,
-        )
-        if response is not None and isinstance(response, list):
-            new_response = []
-            for r in response:
-                new_r = r
-                new_r["total_spend"] = r["_sum"]["spend"]
-                new_r["total_count"] = r["_count"]["_all"]
-                new_r.pop("_sum")
-                new_r.pop("_count")
-                new_response.append(new_r)
+    startTime = startTime or datetime.now() - timedelta(days=30)
+    endTime = endTime or datetime.now()
+
+    sql_query = """
+SELECT end_user, COUNT(*) AS total_count, SUM(spend) AS total_spend
+FROM "LiteLLM_SpendLogs"
+WHERE "startTime" >= $1::timestamp
+  AND "startTime" < $2::timestamp
+  AND (
+    CASE
+      WHEN $3::TEXT IS NULL THEN TRUE
+      ELSE api_key = $3
+    END
+  )
+GROUP BY end_user
+ORDER BY total_spend DESC
+LIMIT 100
+    """
+    response = await prisma_client.db.query_raw(
+        sql_query, startTime, endTime, selected_api_key
+    )
 
     return response
 
@@ -7474,18 +7545,39 @@ async def update_model(
                 exclude_none=True
             )
 
-            for key, value in _existing_litellm_params_dict.items():
-                if key in _new_litellm_params_dict:
-                    _existing_litellm_params_dict[key] = _new_litellm_params_dict[key]
+            ### ENCRYPT PARAMS ###
+            for k, v in _new_litellm_params_dict.items():
+                if isinstance(v, str):
+                    encrypted_value = encrypt_value(value=v, master_key=master_key)  # type: ignore
+                    model_params.litellm_params[k] = base64.b64encode(
+                        encrypted_value
+                    ).decode("utf-8")
+
+            ### MERGE WITH EXISTING DATA ###
+            merged_dictionary = {}
+            _mp = model_params.litellm_params.dict()
+
+            for key, value in _mp.items():
+                if value is not None:
+                    merged_dictionary[key] = value
+                elif (
+                    key in _existing_litellm_params_dict
+                    and _existing_litellm_params_dict[key] is not None
+                ):
+                    merged_dictionary[key] = _existing_litellm_params_dict[key]
+                else:
+                    pass
 
             _data: dict = {
-                "litellm_params": json.dumps(_existing_litellm_params_dict),  # type: ignore
+                "litellm_params": json.dumps(merged_dictionary),  # type: ignore
                 "updated_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
             }
             model_response = await prisma_client.db.litellm_proxymodeltable.update(
                 where={"model_id": _model_id},
                 data=_data,  # type: ignore
             )
+
+            return model_response
     except Exception as e:
         traceback.print_exc()
         if isinstance(e, HTTPException):
