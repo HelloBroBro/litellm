@@ -14,7 +14,6 @@ import dotenv, traceback, random, asyncio, time, contextvars
 from copy import deepcopy
 import httpx
 import litellm
-
 from ._logging import verbose_logger
 from litellm import (  # type: ignore
     client,
@@ -47,6 +46,7 @@ from .llms import (
     ai21,
     sagemaker,
     bedrock,
+    triton,
     huggingface_restapi,
     replicate,
     aleph_alpha,
@@ -74,6 +74,8 @@ from .llms.azure_text import AzureTextCompletion
 from .llms.anthropic import AnthropicChatCompletion
 from .llms.anthropic_text import AnthropicTextCompletion
 from .llms.huggingface_restapi import Huggingface
+from .llms.predibase import PredibaseChatCompletion
+from .llms.triton import TritonChatCompletion
 from .llms.prompt_templates.factory import (
     prompt_factory,
     custom_prompt,
@@ -110,6 +112,8 @@ anthropic_text_completions = AnthropicTextCompletion()
 azure_chat_completions = AzureChatCompletion()
 azure_text_completions = AzureTextCompletion()
 huggingface = Huggingface()
+predibase_chat_completions = PredibaseChatCompletion()
+triton_chat_completions = TritonChatCompletion()
 ####### COMPLETION ENDPOINTS ################
 
 
@@ -318,6 +322,7 @@ async def acompletion(
             or custom_llm_provider == "gemini"
             or custom_llm_provider == "sagemaker"
             or custom_llm_provider == "anthropic"
+            or custom_llm_provider == "predibase"
             or custom_llm_provider in litellm.openai_compatible_providers
         ):  # currently implemented aiohttp calls for just azure, openai, hf, ollama, vertex ai soon all.
             init_response = await loop.run_in_executor(None, func_with_context)
@@ -659,6 +664,7 @@ def completion(
         "region_name",
         "allowed_model_region",
     ]
+
     default_params = openai_params + litellm_params
     non_default_params = {
         k: v for k, v in kwargs.items() if k not in default_params
@@ -1785,6 +1791,52 @@ def completion(
                 )
                 return response
             response = model_response
+        elif custom_llm_provider == "predibase":
+            tenant_id = (
+                optional_params.pop("tenant_id", None)
+                or optional_params.pop("predibase_tenant_id", None)
+                or litellm.predibase_tenant_id
+                or get_secret("PREDIBASE_TENANT_ID")
+            )
+
+            api_base = (
+                optional_params.pop("api_base", None)
+                or optional_params.pop("base_url", None)
+                or litellm.api_base
+                or get_secret("PREDIBASE_API_BASE")
+            )
+
+            api_key = (
+                api_key
+                or litellm.api_key
+                or litellm.predibase_key
+                or get_secret("PREDIBASE_API_KEY")
+            )
+
+            _model_response = predibase_chat_completions.completion(
+                model=model,
+                messages=messages,
+                model_response=model_response,
+                print_verbose=print_verbose,
+                optional_params=optional_params,
+                litellm_params=litellm_params,
+                logger_fn=logger_fn,
+                encoding=encoding,
+                logging_obj=logging,
+                acompletion=acompletion,
+                api_base=api_base,
+                custom_prompt_dict=custom_prompt_dict,
+                api_key=api_key,
+                tenant_id=tenant_id,
+            )
+
+            if (
+                "stream" in optional_params
+                and optional_params["stream"] == True
+                and acompletion == False
+            ):
+                return _model_response
+            response = _model_response
         elif custom_llm_provider == "ai21":
             custom_llm_provider = "ai21"
             ai21_key = (
@@ -2572,6 +2624,7 @@ async def aembedding(*args, **kwargs):
             or custom_llm_provider == "voyage"
             or custom_llm_provider == "mistral"
             or custom_llm_provider == "custom_openai"
+            or custom_llm_provider == "triton"
             or custom_llm_provider == "anyscale"
             or custom_llm_provider == "openrouter"
             or custom_llm_provider == "deepinfra"
@@ -2905,23 +2958,43 @@ def embedding(
                 optional_params=optional_params,
                 model_response=EmbeddingResponse(),
             )
+        elif custom_llm_provider == "triton":
+            if api_base is None:
+                raise ValueError(
+                    "api_base is required for triton. Please pass `api_base`"
+                )
+            response = triton_chat_completions.embedding(
+                model=model,
+                input=input,
+                api_base=api_base,
+                api_key=api_key,
+                logging_obj=logging,
+                timeout=timeout,
+                model_response=EmbeddingResponse(),
+                optional_params=optional_params,
+                client=client,
+                aembedding=aembedding,
+            )
         elif custom_llm_provider == "vertex_ai":
             vertex_ai_project = (
                 optional_params.pop("vertex_project", None)
                 or optional_params.pop("vertex_ai_project", None)
                 or litellm.vertex_project
                 or get_secret("VERTEXAI_PROJECT")
+                or get_secret("VERTEX_PROJECT")
             )
             vertex_ai_location = (
                 optional_params.pop("vertex_location", None)
                 or optional_params.pop("vertex_ai_location", None)
                 or litellm.vertex_location
                 or get_secret("VERTEXAI_LOCATION")
+                or get_secret("VERTEX_LOCATION")
             )
             vertex_credentials = (
                 optional_params.pop("vertex_credentials", None)
                 or optional_params.pop("vertex_ai_credentials", None)
                 or get_secret("VERTEXAI_CREDENTIALS")
+                or get_secret("VERTEX_CREDENTIALS")
             )
 
             response = vertex_ai.embedding(
