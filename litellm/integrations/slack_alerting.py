@@ -31,7 +31,8 @@ class LiteLLMBase(BaseModel):
 
 
 class SlackAlertingArgs(LiteLLMBase):
-    daily_report_frequency: int = 12 * 60 * 60  # 12 hours
+    default_daily_report_frequency: int = 12 * 60 * 60  # 12 hours
+    daily_report_frequency: int = int(os.getenv("SLACK_DAILY_REPORT_FREQUENCY", default_daily_report_frequency))
     report_check_interval: int = 5 * 60  # 5 minutes
 
 
@@ -346,8 +347,9 @@ class SlackAlerting(CustomLogger):
 
         all_none = True
         for val in combined_metrics_values:
-            if val is not None:
+            if val is not None and val > 0:
                 all_none = False
+                break
 
         if all_none:
             return False
@@ -365,13 +367,14 @@ class SlackAlerting(CustomLogger):
             for value in failed_request_values
         ]
 
-        ## Get the indices of top 5 keys with the highest numerical values (ignoring None values)
+        ## Get the indices of top 5 keys with the highest numerical values (ignoring None and 0 values)
         top_5_failed = sorted(
             range(len(replaced_failed_values)),
             key=lambda i: replaced_failed_values[i],
             reverse=True,
         )[:5]
-
+        top_5_failed = [index for index in top_5_failed if replaced_failed_values[index] > 0]
+        
         # find top 5 slowest
         # Replace None values with a placeholder value (-1 in this case)
         placeholder_value = 0
@@ -380,17 +383,20 @@ class SlackAlerting(CustomLogger):
             for value in latency_values
         ]
 
-        # Get the indices of top 5 values with the highest numerical values (ignoring None values)
+        # Get the indices of top 5 values with the highest numerical values (ignoring None and 0 values)
         top_5_slowest = sorted(
             range(len(replaced_slowest_values)),
             key=lambda i: replaced_slowest_values[i],
             reverse=True,
         )[:5]
+        top_5_slowest = [index for index in top_5_slowest if replaced_slowest_values[index] > 0]
 
         # format alert -> return the litellm model name + api base
         message = f"\n\nHere are today's key metrics 📈: \n\n"
 
-        message += "\n\n*❗️ Top 5 Deployments with Most Failed Requests:*\n\n"
+        message += "\n\n*❗️ Top Deployments with Most Failed Requests:*\n\n"
+        if not top_5_failed:
+            message += "\tNone\n"
         for i in range(len(top_5_failed)):
             key = failed_request_keys[top_5_failed[i]].split(":")[0]
             _deployment = router.get_model_info(key)
@@ -410,7 +416,9 @@ class SlackAlerting(CustomLogger):
             value = replaced_failed_values[top_5_failed[i]]
             message += f"\t{i+1}. Deployment: `{deployment_name}`, Failed Requests: `{value}`,  API Base: `{api_base}`\n"
 
-        message += "\n\n*😅 Top 5 Slowest Deployments:*\n\n"
+        message += "\n\n*😅 Top Slowest Deployments:*\n\n"
+        if not top_5_slowest:
+            message += "\tNone\n"
         for i in range(len(top_5_slowest)):
             key = latency_keys[top_5_slowest[i]].split(":")[0]
             _deployment = router.get_model_info(key)

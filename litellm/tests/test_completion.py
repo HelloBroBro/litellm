@@ -59,7 +59,7 @@ def test_completion_custom_provider_model_name():
             messages=messages,
             logger_fn=logger_fn,
         )
-        # Add any assertions here to, check the response
+        # Add assertions here to check the-response
         print(response)
         print(response["choices"][0]["finish_reason"])
     except litellm.Timeout as e:
@@ -93,7 +93,7 @@ def _openai_mock_response(*args, **kwargs) -> litellm.ModelResponse:
 
 def test_null_role_response():
     """
-    Test if api returns 'null' role, 'assistant' role is still returned
+    Test if the api returns 'null' role, 'assistant' role is still returned
     """
     import openai
 
