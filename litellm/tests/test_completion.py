@@ -38,7 +38,7 @@ def reset_callbacks():
 @pytest.mark.skip(reason="Local test")
 def test_response_model_none():
     """
-    Addresses - https://github.com/BerriAI/litellm/issues/2972
+    Addresses:https://github.com/BerriAI/litellm/issues/2972
     """
     x = completion(
         model="mymodel",
@@ -1161,28 +1161,28 @@ HF Tests we should pass
 # Test util to sort models to TGI, conv, None
 def test_get_hf_task_for_model():
     model = "glaiveai/glaive-coder-7b"
-    model_type = litellm.llms.huggingface_restapi.get_hf_task_for_model(model)
+    model_type, _ = litellm.llms.huggingface_restapi.get_hf_task_for_model(model)
     print(f"model:{model}, model type: {model_type}")
     assert model_type == "text-generation-inference"
 
     model = "meta-llama/Llama-2-7b-hf"
-    model_type = litellm.llms.huggingface_restapi.get_hf_task_for_model(model)
+    model_type, _ = litellm.llms.huggingface_restapi.get_hf_task_for_model(model)
     print(f"model:{model}, model type: {model_type}")
     assert model_type == "text-generation-inference"
 
     model = "facebook/blenderbot-400M-distill"
-    model_type = litellm.llms.huggingface_restapi.get_hf_task_for_model(model)
+    model_type, _ = litellm.llms.huggingface_restapi.get_hf_task_for_model(model)
     print(f"model:{model}, model type: {model_type}")
     assert model_type == "conversational"
 
     model = "facebook/blenderbot-3B"
-    model_type = litellm.llms.huggingface_restapi.get_hf_task_for_model(model)
+    model_type, _ = litellm.llms.huggingface_restapi.get_hf_task_for_model(model)
     print(f"model:{model}, model type: {model_type}")
     assert model_type == "conversational"
 
     # neither Conv or None
     model = "roneneldan/TinyStories-3M"
-    model_type = litellm.llms.huggingface_restapi.get_hf_task_for_model(model)
+    model_type, _ = litellm.llms.huggingface_restapi.get_hf_task_for_model(model)
     print(f"model:{model}, model type: {model_type}")
     assert model_type == "text-generation"
 
@@ -1318,6 +1318,10 @@ def test_hf_test_completion_tgi():
 
 
 def mock_post(url, data=None, json=None, headers=None):
+
+    print(f"url={url}")
+    if "text-classification" in url:
+        raise Exception("Model not found")
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.headers = {"Content-Type": "application/json"}
