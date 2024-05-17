@@ -278,7 +278,8 @@ def test_completion_claude_3_function_call():
             model="anthropic/claude-3-opus-20240229",
             messages=messages,
             tools=tools,
-            tool_choice="auto",
+            tool_choice={"type": "tool", "name": "get_weather"},
+            extra_headers={"anthropic-beta": "tools-2024-05-16"},
         )
         # Add any assertions, here to check response args
         print(response)
@@ -2300,36 +2301,28 @@ def test_completion_azure_deployment_id():
 
 # test_completion_azure_deployment_id()
 
-# Only works for local endpoint
-# def test_completion_anthropic_openai_proxy():
-#     try:
-#         response = completion(
-#             model="custom_openai/claude-2",
-#             messages=messages,
-#             api_base="http://0.0.0.0:8000"
-#         )
-#         # Add any assertions here to check the response
-#         print(response)
-#     except Exception as e:
-#         pytest.fail(f"Error occurred: {e}")
 
-# test_completion_anthropic_openai_proxy()
-
-
-def test_completion_replicate_llama3():
+@pytest.mark.parametrize("sync_mode", [False, True])
+@pytest.mark.asyncio
+async def test_completion_replicate_llama3(sync_mode):
     litellm.set_verbose = True
     model_name = "replicate/meta/meta-llama-3-8b-instruct"
     try:
-        response = completion(
-            model=model_name,
-            messages=messages,
-        )
+        if sync_mode:
+            response = completion(
+                model=model_name,
+                messages=messages,
+            )
+        else:
+            response = await litellm.acompletion(
+                model=model_name,
+                messages=messages,
+            )
+            print(f"ASYNC REPLICATE RESPONSE - {response}")
         print(response)
         # Add any assertions here to check the response
-        response_str = response["choices"][0]["message"]["content"]
-        print("RESPONSE STRING\n", response_str)
-        if type(response_str) != str:
-            pytest.fail(f"Error occurred: {e}")
+        assert isinstance(response, litellm.ModelResponse)
+        response_format_tests(response=response)
     except Exception as e:
         pytest.fail(f"Error occurred: {e}")
 
@@ -3096,7 +3089,6 @@ def test_mistral_anyscale_stream():
         print(chunk["choices"][0]["delta"].get("content", ""), end="")
 
 
-# test_mistral_anyscale_stream()
 # test_completion_anyscale_2()
 # def test_completion_with_fallbacks_multiple_keys():
 #     print(f"backup key 1: {os.getenv('BACKUP_OPENAI_API_KEY_1')}")
@@ -3246,6 +3238,7 @@ def test_completion_gemini():
         response = completion(model=model_name, messages=messages)
         # Add any assertions,here to check the response
         print(response)
+        assert response.choices[0]["index"] == 0
     except litellm.APIError as e:
         pass
     except Exception as e:

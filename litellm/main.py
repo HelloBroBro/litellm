@@ -320,6 +320,7 @@ async def acompletion(
             or custom_llm_provider == "huggingface"
             or custom_llm_provider == "ollama"
             or custom_llm_provider == "ollama_chat"
+            or custom_llm_provider == "replicate"
             or custom_llm_provider == "vertex_ai"
             or custom_llm_provider == "gemini"
             or custom_llm_provider == "sagemaker"
@@ -552,7 +553,7 @@ def completion(
     model_info = kwargs.get("model_info", None)
     proxy_server_request = kwargs.get("proxy_server_request", None)
     fallbacks = kwargs.get("fallbacks", None)
-    headers = kwargs.get("headers", None)
+    headers = kwargs.get("headers", None) or extra_headers
     num_retries = kwargs.get("num_retries", None)  ## deprecated
     max_retries = kwargs.get("max_retries", None)
     context_window_fallback_dict = kwargs.get("context_window_fallback_dict", None)
@@ -674,20 +675,6 @@ def completion(
         k: v for k, v in kwargs.items() if k not in default_params
     }  # model-specific params - pass them straight to the model/provider
 
-    ### TIMEOUT LOGIC ###
-    timeout = timeout or kwargs.get("request_timeout", 600) or 600
-    # set timeout for 10 minutes by default
-
-    if (
-        timeout is not None
-        and isinstance(timeout, httpx.Timeout)
-        and supports_httpx_timeout(custom_llm_provider) == False
-    ):
-        read_timeout = timeout.read or 600
-        timeout = read_timeout  # default 10 min timeout
-    elif timeout is not None and not isinstance(timeout, httpx.Timeout):
-        timeout = float(timeout)  # type: ignore
-
     try:
         if base_url is not None:
             api_base = base_url
@@ -726,6 +713,16 @@ def completion(
             model_response._hidden_params["region_name"] = kwargs.get(
                 "aws_region_name", None
             )  # support region-based pricing for bedrock
+
+        ### TIMEOUT LOGIC ###
+        timeout = timeout or kwargs.get("request_timeout", 600) or 600
+        # set timeout for 10 minutes by default
+        if isinstance(timeout, httpx.Timeout) and not supports_httpx_timeout(
+            custom_llm_provider
+        ):
+            timeout = timeout.read or 600  # default 10 min timeout
+        elif not isinstance(timeout, httpx.Timeout):
+            timeout = float(timeout)  # type: ignore
 
         ### REGISTER CUSTOM MODEL PRICING -- IF GIVEN ###
         if input_cost_per_token is not None and output_cost_per_token is not None:
@@ -1192,7 +1189,7 @@ def completion(
 
             custom_prompt_dict = custom_prompt_dict or litellm.custom_prompt_dict
 
-            model_response = replicate.completion(
+            model_response = replicate.completion(  # type: ignore
                 model=model,
                 messages=messages,
                 api_base=api_base,
@@ -1205,12 +1202,10 @@ def completion(
                 api_key=replicate_key,
                 logging_obj=logging,
                 custom_prompt_dict=custom_prompt_dict,
+                acompletion=acompletion,
             )
-            if "stream" in optional_params and optional_params["stream"] == True:
-                # don't try to access stream object,
-                model_response = CustomStreamWrapper(model_response, model, logging_obj=logging, custom_llm_provider="replicate")  # type: ignore
 
-            if optional_params.get("stream", False) or acompletion == True:
+            if optional_params.get("stream", False) == True:
                 ## LOGGING
                 logging.post_call(
                     input=messages,

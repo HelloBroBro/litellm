@@ -52,8 +52,18 @@ class LiteLLM_UpperboundKeyGenerateParams(LiteLLMBase):
 
 
 class LiteLLMRoutes(enum.Enum):
+    openai_route_names: List = [
+        "chat_completion",
+        "completion",
+        "embeddings",
+        "image_generation",
+        "audio_transcriptions",
+        "moderations",
+        "model_list",  # OpenAI /v1/models route
+    ]
     openai_routes: List = [
         # chat completions
+        "/engines/{model}/chat/completions",
         "/openai/deployments/{model}/chat/completions",
         "/chat/completions",
         "/v1/chat/completions",
@@ -78,6 +88,8 @@ class LiteLLMRoutes(enum.Enum):
         "/models",
         "/v1/models",
     ]
+
+    llm_utils_routes: List = ["utils/token_counter"]
 
     info_routes: List = [
         "/key/info",
@@ -202,13 +214,19 @@ class LiteLLM_JWTAuth(LiteLLMBase):
         "global_spend_tracking_routes",
         "info_routes",
     ]
-    team_jwt_scope: str = "litellm_team"
-    team_id_jwt_field: str = "client_id"
+    team_id_jwt_field: Optional[str] = None
     team_allowed_routes: List[
         Literal["openai_routes", "info_routes", "management_routes"]
     ] = ["openai_routes", "info_routes"]
+    team_id_default: Optional[str] = Field(
+        default=None,
+        description="If no team_id given, default permissions/spend-tracking to this team.s",
+    )
     org_id_jwt_field: Optional[str] = None
     user_id_jwt_field: Optional[str] = None
+    user_id_upsert: bool = Field(
+        default=False, description="If user doesn't exist, upsert them into the db."
+    )
     end_user_id_jwt_field: Optional[str] = None
     public_key_ttl: float = 600
 
@@ -995,3 +1013,16 @@ class LiteLLM_ErrorLogs(LiteLLMBase):
 
 class LiteLLM_SpendLogs_ResponseObject(LiteLLMBase):
     response: Optional[List[Union[LiteLLM_SpendLogs, Any]]] = None
+
+
+class TokenCountRequest(LiteLLMBase):
+    model: str
+    prompt: Optional[str] = None
+    messages: Optional[List[dict]] = None
+
+
+class TokenCountResponse(LiteLLMBase):
+    total_tokens: int
+    request_model: str
+    model_used: str
+    tokenizer_type: str

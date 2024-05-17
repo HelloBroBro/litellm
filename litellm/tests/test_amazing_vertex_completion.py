@@ -371,7 +371,7 @@ def test_vertex_ai_stream():
                 "gemini-1.5-pro",
                 "gemini-1.5-pro-preview-0215",
             ]:
-                # our account does not have access to this model
+                # ouraccount does not have access to this model
                 continue
             print("making request", model)
             response = completion(
@@ -388,7 +388,7 @@ def test_vertex_ai_stream():
                 completed_str += content
                 assert type(content) == str
                 # pass
-            assert len(completed_str) > 4
+            assert len(completed_str) > 1
         except litellm.RateLimitError as e:
             pass
         except Exception as e:

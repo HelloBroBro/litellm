@@ -35,6 +35,7 @@ from dataclasses import (
 import litellm._service_logger  # for storing API inputs, outputs, and metadata
 from litellm.llms.custom_httpx.http_handler import HTTPHandler
 from litellm.caching import DualCache
+from litellm.types.utils import CostPerToken
 
 oidc_cache = DualCache()
 
@@ -76,6 +77,7 @@ from .integrations.weights_biases import WeightsBiasesLogger
 from .integrations.custom_logger import CustomLogger
 from .integrations.langfuse import LangFuseLogger
 from .integrations.openmeter import OpenMeterLogger
+from .integrations.lago import LagoLogger
 from .integrations.datadog import DataDogLogger
 from .integrations.prometheus import PrometheusLogger
 from .integrations.prometheus_services import PrometheusServicesLogger
@@ -123,6 +125,7 @@ from typing import (
     BinaryIO,
     Iterable,
     Tuple,
+    Callable,
 )
 from .caching import Cache
 from concurrent.futures import ThreadPoolExecutor
@@ -147,6 +150,7 @@ weightsBiasesLogger = None
 customLogger = None
 langFuseLogger = None
 openMeterLogger = None
+lagoLogger = None
 dataDogLogger = None
 prometheusLogger = None
 dynamoLogger = None
@@ -2111,7 +2115,7 @@ class Logging:
         """
         Implementing async callbacks, to handle asyncio event loop issues when custom integrations need to use async functions.
         """
-        print_verbose(f"Logging Details LiteLLM-Async Success Call: {cache_hit}")
+        print_verbose(f"Logging Details LiteLLM-Async Success Call")
         start_time, end_time, result = self._success_handler_helper_fn(
             start_time=start_time, end_time=end_time, result=result, cache_hit=cache_hit
         )
@@ -2333,8 +2337,8 @@ class Logging:
                             end_time=end_time,
                             print_verbose=print_verbose,
                         )
-            except:
-                print_verbose(
+            except Exception as e:
+                verbose_logger.error(
                     f"LiteLLM.LoggingError: [Non-Blocking] Exception occurred while success logging {traceback.format_exc()}"
                 )
                 pass
@@ -2692,6 +2696,15 @@ class Rules:
         return True
 
 
+def _init_custom_logger_compatible_class(
+    logging_integration: litellm._custom_logger_compatible_callbacks_literal,
+) -> Callable:
+    if logging_integration == "lago":
+        return LagoLogger()  # type: ignore
+    elif logging_integration == "openmeter":
+        return OpenMeterLogger()  # type: ignore
+
+
 ####### CLIENT ###################
 # make it easy to log if completion/embedding runs succeeded or failed + see what happened | Non-Blocking
 def function_setup(
@@ -2702,16 +2715,24 @@ def function_setup(
         function_id = kwargs["id"] if "id" in kwargs else None
         if len(litellm.callbacks) > 0:
             for callback in litellm.callbacks:
+                # check if callback is a string - e.g. "lago", "openmeter"
+                if isinstance(callback, str):
+                    callback = _init_custom_logger_compatible_class(callback)
+                    if any(
+                        isinstance(cb, type(callback))
+                        for cb in litellm._async_success_callback
+                    ):  # don't double add a callback
+                        continue
                 if callback not in litellm.input_callback:
-                    litellm.input_callback.append(callback)
+                    litellm.input_callback.append(callback)  # type: ignore
                 if callback not in litellm.success_callback:
-                    litellm.success_callback.append(callback)
+                    litellm.success_callback.append(callback)  # type: ignore
                 if callback not in litellm.failure_callback:
-                    litellm.failure_callback.append(callback)
+                    litellm.failure_callback.append(callback)  # type: ignore
                 if callback not in litellm._async_success_callback:
-                    litellm._async_success_callback.append(callback)
+                    litellm._async_success_callback.append(callback)  # type: ignore
                 if callback not in litellm._async_failure_callback:
-                    litellm._async_failure_callback.append(callback)
+                    litellm._async_failure_callback.append(callback)  # type: ignore
             print_verbose(
                 f"Initialized litellm callbacks, Async Success Callbacks: {litellm._async_success_callback}"
             )
@@ -3860,7 +3881,12 @@ def _select_tokenizer(model: str):
         return {"type": "huggingface_tokenizer", "tokenizer": tokenizer}
     # default - tiktoken
     else:
-        return {"type": "openai_tokenizer", "tokenizer": encoding}
+        tokenizer = None
+        try:
+            tokenizer = Tokenizer.from_pretrained(model)
+            return {"type": "huggingface_tokenizer", "tokenizer": tokenizer}
+        except:
+            return {"type": "openai_tokenizer", "tokenizer": encoding}
 
 
 def encode(model="", text="", custom_tokenizer: Optional[dict] = None):
@@ -4097,6 +4123,7 @@ def token_counter(
     text: Optional[Union[str, List[str]]] = None,
     messages: Optional[List] = None,
     count_response_tokens: Optional[bool] = False,
+    return_tokenizer_used: Optional[bool] = False,
 ):
     """
     Count the number of tokens in a given text using a specified model.
@@ -4189,8 +4216,34 @@ def token_counter(
                 )
     else:
         num_tokens = len(encoding.encode(text, disallowed_special=()))  # type: ignore
-
+    _tokenizer_type = tokenizer_json["type"]
+    if return_tokenizer_used:
+        # used by litellm proxy server ->  POST /utils/token_counter
+        return num_tokens, _tokenizer_type
     return num_tokens
+
+
+def _cost_per_token_custom_pricing_helper(
+    prompt_tokens=0,
+    completion_tokens=0,
+    response_time_ms=None,
+    ### CUSTOM PRICING ###
+    custom_cost_per_token: Optional[CostPerToken] = None,
+    custom_cost_per_second: Optional[float] = None,
+) -> Optional[Tuple[float, float]]:
+    """Internal helper function for calculating cost, if custom pricing given"""
+    if custom_cost_per_token is None and custom_cost_per_second is None:
+        return None
+
+    if custom_cost_per_token is not None:
+        input_cost = custom_cost_per_token["input_cost_per_token"] * prompt_tokens
+        output_cost = custom_cost_per_token["output_cost_per_token"] * completion_tokens
+        return input_cost, output_cost
+    elif custom_cost_per_second is not None:
+        output_cost = custom_cost_per_second * response_time_ms / 1000  # type: ignore
+        return 0, output_cost
+
+    return None
 
 
 def cost_per_token(
@@ -4200,7 +4253,10 @@ def cost_per_token(
     response_time_ms=None,
     custom_llm_provider=None,
     region_name=None,
-):
+    ### CUSTOM PRICING ###
+    custom_cost_per_token: Optional[CostPerToken] = None,
+    custom_cost_per_second: Optional[float] = None,
+) -> Tuple[float, float]:
     """
     Calculates the cost per token for a given model, prompt tokens, and completion tokens.
 
@@ -4208,13 +4264,28 @@ def cost_per_token(
         model (str): The name of the model to use. Default is ""
         prompt_tokens (int): The number of tokens in the prompt.
         completion_tokens (int): The number of tokens in the completion.
+        response_time (float): The amount of time, in milliseconds, it took the call to complete.
+        custom_llm_provider (str): The llm provider to whom the call was made (see init.py for full list)
+        custom_cost_per_token: Optional[CostPerToken]: the cost per input + output token for the llm api call.
+        custom_cost_per_second: Optional[float]: the cost per second for the llm api call.
 
     Returns:
         tuple: A tuple containing the cost in USD dollars for prompt tokens and completion tokens, respectively.
     """
+    ## CUSTOM PRICING ##
+    response_cost = _cost_per_token_custom_pricing_helper(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        response_time_ms=response_time_ms,
+        custom_cost_per_second=custom_cost_per_second,
+        custom_cost_per_token=custom_cost_per_token,
+    )
+    if response_cost is not None:
+        return response_cost[0], response_cost[1]
+
     # given
-    prompt_tokens_cost_usd_dollar = 0
-    completion_tokens_cost_usd_dollar = 0
+    prompt_tokens_cost_usd_dollar: float = 0
+    completion_tokens_cost_usd_dollar: float = 0
     model_cost_ref = litellm.model_cost
     model_with_provider = model
     if custom_llm_provider is not None:
@@ -4310,6 +4381,28 @@ def cost_per_token(
             * completion_tokens
         )
         return prompt_tokens_cost_usd_dollar, completion_tokens_cost_usd_dollar
+    elif "ft:davinci-002" in model:
+        print_verbose(f"Cost Tracking: {model} is an OpenAI FinteTuned LLM")
+        # fuzzy match ft:davinci-002:abcd-id-cool-litellm
+        prompt_tokens_cost_usd_dollar = (
+            model_cost_ref["ft:davinci-002"]["input_cost_per_token"] * prompt_tokens
+        )
+        completion_tokens_cost_usd_dollar = (
+            model_cost_ref["ft:davinci-002"]["output_cost_per_token"]
+            * completion_tokens
+        )
+        return prompt_tokens_cost_usd_dollar, completion_tokens_cost_usd_dollar
+    elif "ft:babbage-002" in model:
+        print_verbose(f"Cost Tracking: {model} is an OpenAI FinteTuned LLM")
+        # fuzzy match ft:babbage-002:abcd-id-cool-litellm
+        prompt_tokens_cost_usd_dollar = (
+            model_cost_ref["ft:babbage-002"]["input_cost_per_token"] * prompt_tokens
+        )
+        completion_tokens_cost_usd_dollar = (
+            model_cost_ref["ft:babbage-002"]["output_cost_per_token"]
+            * completion_tokens
+        )
+        return prompt_tokens_cost_usd_dollar, completion_tokens_cost_usd_dollar
     elif model in litellm.azure_llms:
         verbose_logger.debug(f"Cost Tracking: {model} is an Azure LLM")
         model = litellm.azure_llms[model]
@@ -4377,6 +4470,9 @@ def completion_cost(
     size=None,
     quality=None,
     n=None,  # number of images
+    ### CUSTOM PRICING ###
+    custom_cost_per_token: Optional[CostPerToken] = None,
+    custom_cost_per_second: Optional[float] = None,
 ) -> float:
     """
     Calculate the cost of a given completion call fot GPT-3.5-turbo, llama2, any litellm supported llm.
@@ -4389,9 +4485,15 @@ def completion_cost(
         prompt (str): Optional. The input prompt passed to the llm
         completion (str): Optional. The output completion text from the llm
         total_time (float): Optional. (Only used for Replicate LLMs) The total time used for the request in seconds
+        custom_cost_per_token: Optional[CostPerToken]: the cost per input + output token for the llm api call.
+        custom_cost_per_second: Optional[float]: the cost per second for the llm api call.
 
     Returns:
         float: The cost in USD dollars for the completion based on the provided parameters.
+
+    Exceptions:
+        Raises exception if model not in the litellm model cost map. Register model, via custom pricing or PR - https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json
+
 
     Note:
         - If completion_response is provided, the function extracts token information and the model name from it.
@@ -4399,9 +4501,6 @@ def completion_cost(
         - The cost is calculated based on the model, prompt tokens, and completion tokens.
         - For certain models containing "togethercomputer" in the name, prices are based on the model size.
         - For un-mapped Replicate models, the cost is calculated based on the total time used for the request.
-
-    Exceptions:
-        - If an error occurs during execution, the error is raised
     """
     try:
         if (
@@ -4531,6 +4630,8 @@ def completion_cost(
             custom_llm_provider=custom_llm_provider,
             response_time_ms=total_time,
             region_name=region_name,
+            custom_cost_per_second=custom_cost_per_second,
+            custom_cost_per_token=custom_cost_per_token,
         )
         _final_cost = prompt_tokens_cost_usd_dollar + completion_tokens_cost_usd_dollar
         print_verbose(
@@ -6034,7 +6135,7 @@ def get_api_base(model: str, optional_params: dict) -> Optional[str]:
             )
         )
     except Exception as e:
-        verbose_logger.error("Error occurred in getting api base - {}".format(str(e)))
+        verbose_logger.debug("Error occurred in getting api base - {}".format(str(e)))
         custom_llm_provider = None
         dynamic_api_key = None
         dynamic_api_base = None
@@ -8527,7 +8628,10 @@ def exception_type(
                     message=f"ReplicateException - {str(original_exception)}",
                     llm_provider="replicate",
                     model=model,
-                    request=original_exception.request,
+                    request=httpx.Request(
+                        method="POST",
+                        url="https://api.replicate.com/v1/deployments",
+                    ),
                 )
             elif custom_llm_provider == "watsonx":
                 if "token_quota_reached" in error_str:
@@ -11406,6 +11510,7 @@ class CustomStreamWrapper:
                 or self.custom_llm_provider == "vertex_ai"
                 or self.custom_llm_provider == "sagemaker"
                 or self.custom_llm_provider == "gemini"
+                or self.custom_llm_provider == "replicate"
                 or self.custom_llm_provider == "cached_response"
                 or self.custom_llm_provider == "predibase"
                 or (self.custom_llm_provider == "bedrock" and "cohere" in self.model)
