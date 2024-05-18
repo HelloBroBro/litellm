@@ -110,6 +110,7 @@ from litellm.router import LiteLLM_Params, Deployment, updateDeployment
 from litellm.router import ModelInfo as RouterModelInfo
 from litellm._logging import verbose_router_logger, verbose_proxy_logger
 from litellm.proxy.auth.handle_jwt import JWTHandler
+from litellm.proxy.auth.litellm_license import LicenseCheck
 from litellm.proxy.hooks.prompt_injection_detection import (
     _OPTIONAL_PromptInjectionDetection,
 )
@@ -150,6 +151,7 @@ from fastapi.responses import (
     ORJSONResponse,
     JSONResponse,
 )
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -169,22 +171,60 @@ except Exception as e:
     except Exception as e:
         pass
 
+_license_check = LicenseCheck()
+premium_user: bool = _license_check.is_premium()
+
 ui_link = f"/ui/"
 ui_message = (
     f"👉 [```LiteLLM Admin Panel on /ui```]({ui_link}). Create, Edit Keys with SSO"
 )
 
+### CUSTOM BRANDING [ENTERPRISE FEATURE] ###
 _docs_url = None if os.getenv("NO_DOCS", "False") == "True" else "/"
+_title = os.getenv("DOCS_TITLE", "LiteLLM API") if premium_user else "LiteLLM API"
+_description = (
+    os.getenv(
+        "DOCS_DESCRIPTION",
+        f"Proxy Server to call 100+ LLMs in the OpenAI format\n\n{ui_message}",
+    )
+    if premium_user
+    else f"Proxy Server to call 100+ LLMs in the OpenAI format\n\n{ui_message}"
+)
 
 app = FastAPI(
     docs_url=_docs_url,
-    title="LiteLLM API",
-    description=f"Proxy Server to call 100+ LLMs in the OpenAI format\n\n{ui_message}",
+    title=_title,
+    description=_description,
     version=version,
     root_path=os.environ.get(
         "SERVER_ROOT_PATH", ""
     ),  # check if user passed root path, FastAPI defaults this value to ""
 )
+
+
+### CUSTOM API DOCS [ENTERPRISE FEATURE] ###
+# Custom OpenAPI schema generator to include only selected routes
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    # Filter routes to include only specific ones
+    openai_routes = LiteLLMRoutes.openai_routes.value
+    paths_to_include: dict = {}
+    for route in openai_routes:
+        paths_to_include[route] = openapi_schema["paths"][route]
+    openapi_schema["paths"] = paths_to_include
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+if os.getenv("DOCS_FILTERED", "False") == "True" and premium_user:
+    app.openapi = custom_openapi  # type: ignore
 
 
 class ProxyException(Exception):
@@ -631,15 +671,21 @@ async def user_api_key_auth(
         _end_user_object = None
         end_user_params = {}
         if "user" in request_data:
-            _end_user_object = await get_end_user_object(
-                end_user_id=request_data["user"],
-                prisma_client=prisma_client,
-                user_api_key_cache=user_api_key_cache,
-            )
-            if _end_user_object is not None:
-                end_user_params["allowed_model_region"] = (
-                    _end_user_object.allowed_model_region
+            try:
+                _end_user_object = await get_end_user_object(
+                    end_user_id=request_data["user"],
+                    prisma_client=prisma_client,
+                    user_api_key_cache=user_api_key_cache,
                 )
+                if _end_user_object is not None:
+                    end_user_params["allowed_model_region"] = (
+                        _end_user_object.allowed_model_region
+                    )
+            except Exception as e:
+                verbose_proxy_logger.debug(
+                    "Unable to find user in db. Error - {}".format(str(e))
+                )
+                pass
 
         try:
             is_master_key_valid = secrets.compare_digest(api_key, master_key)  # type: ignore
@@ -4874,11 +4920,12 @@ async def token_counter(request: TokenCountRequest):
     model_to_use = (
         litellm_model_name or request.model
     )  # use litellm model name, if it's not avalable then fallback to request.model
-    total_tokens, tokenizer_used = token_counter(
+    _tokenizer_used = litellm.utils._select_tokenizer(model=model_to_use)
+    tokenizer_used = str(_tokenizer_used["type"])
+    total_tokens = token_counter(
         model=model_to_use,
         text=prompt,
         messages=messages,
-        return_tokenizer_used=True,
     )
     return TokenCountResponse(
         total_tokens=total_tokens,
@@ -8088,6 +8135,7 @@ async def add_new_model(
                     await proxy_logging_obj.slack_alerting_instance.model_added_alert(
                         model_name=model_params.model_name,
                         litellm_model_name=_orignal_litellm_model_name,
+                        passed_model_info=model_params.model_info,
                     )
             except:
                 pass
