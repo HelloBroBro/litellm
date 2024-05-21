@@ -11,6 +11,7 @@ from litellm.proxy._types import (
     LiteLLM_EndUserTable,
     LiteLLM_TeamTable,
     Member,
+    CallInfo,
 )
 from litellm.caching import DualCache, RedisCache
 from litellm.router import Deployment, ModelInfo, LiteLLM_Params
@@ -18,8 +19,18 @@ from litellm.llms.custom_httpx.httpx_handler import HTTPHandler
 from litellm.proxy.hooks.parallel_request_limiter import (
     _PROXY_MaxParallelRequestsHandler,
 )
+from litellm.exceptions import RejectedRequestError
 from litellm._service_logger import ServiceLogging, ServiceTypes
-from litellm import ModelResponse, EmbeddingResponse, ImageResponse
+from litellm import (
+    ModelResponse,
+    EmbeddingResponse,
+    ImageResponse,
+    TranscriptionResponse,
+    TextCompletionResponse,
+    CustomStreamWrapper,
+    TextCompletionStreamWrapper,
+)
+from litellm.utils import ModelResponseIterator
 from litellm.proxy.hooks.max_budget_limiter import _PROXY_MaxBudgetLimiter
 from litellm.proxy.hooks.tpm_rpm_limiter import _PROXY_MaxTPMRPMLimiter
 from litellm.proxy.hooks.cache_control_check import _PROXY_CacheControlCheck
@@ -32,6 +43,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from litellm.integrations.slack_alerting import SlackAlerting
+from typing_extensions import overload
 
 
 def print_verbose(print_statement):
@@ -131,7 +143,13 @@ class ProxyLogging:
             alerting_args=alerting_args,
         )
 
-        if "daily_reports" in self.alert_types:
+        if (
+            self.alerting is not None
+            and "slack" in self.alerting
+            and "daily_reports" in self.alert_types
+        ):
+            # NOTE: ENSURE we only add callbacks when alerting is on
+            # We should NOT add callbacks when alerting is off
             litellm.callbacks.append(self.slack_alerting_instance)  # type: ignore
 
         if redis_cache is not None:
@@ -176,18 +194,20 @@ class ProxyLogging:
             )
             litellm.utils.set_callbacks(callback_list=callback_list)
 
+    # The actual implementation of the function
     async def pre_call_hook(
         self,
         user_api_key_dict: UserAPIKeyAuth,
         data: dict,
         call_type: Literal[
             "completion",
+            "text_completion",
             "embeddings",
             "image_generation",
             "moderation",
             "audio_transcription",
         ],
-    ):
+    ) -> dict:
         """
         Allows users to modify/reject the incoming request to the proxy, without having to deal with parsing Request body.
 
@@ -214,8 +234,25 @@ class ProxyLogging:
                         call_type=call_type,
                     )
                     if response is not None:
-                        data = response
-
+                        if isinstance(response, Exception):
+                            raise response
+                        elif isinstance(response, dict):
+                            data = response
+                        elif isinstance(response, str):
+                            if (
+                                call_type == "completion"
+                                or call_type == "text_completion"
+                            ):
+                                raise RejectedRequestError(
+                                    message=response,
+                                    model=data.get("model", ""),
+                                    llm_provider="",
+                                    request_data=data,
+                                )
+                            else:
+                                raise HTTPException(
+                                    status_code=400, detail={"error": response}
+                                )
             print_verbose(f"final data being sent to {call_type} call: {data}")
             return data
         except Exception as e:
@@ -276,30 +313,30 @@ class ProxyLogging:
                 raise e
         return data
 
+    async def failed_tracking_alert(self, error_message: str):
+        if self.alerting is None:
+            return
+        await self.slack_alerting_instance.failed_tracking_alert(
+            error_message=error_message
+        )
+
     async def budget_alerts(
         self,
         type: Literal[
             "token_budget",
             "user_budget",
-            "user_and_proxy_budget",
-            "failed_budgets",
-            "failed_tracking",
+            "team_budget",
+            "proxy_budget",
             "projected_limit_exceeded",
         ],
-        user_max_budget: float,
-        user_current_spend: float,
-        user_info=None,
-        error_message="",
+        user_info: CallInfo,
     ):
         if self.alerting is None:
             # do nothing if alerting is not switched on
             return
         await self.slack_alerting_instance.budget_alerts(
             type=type,
-            user_max_budget=user_max_budget,
-            user_current_spend=user_current_spend,
             user_info=user_info,
-            error_message=error_message,
         )
 
     async def alerting_handler(
@@ -355,7 +392,11 @@ class ProxyLogging:
         for client in self.alerting:
             if client == "slack":
                 await self.slack_alerting_instance.send_alert(
-                    message=message, level=level, alert_type=alert_type, **extra_kwargs
+                    message=message,
+                    level=level,
+                    alert_type=alert_type,
+                    user_info=None,
+                    **extra_kwargs,
                 )
             elif client == "sentry":
                 if litellm.utils.sentry_sdk_instance is not None:
@@ -436,7 +477,7 @@ class ProxyLogging:
 
             asyncio.create_task(
                 self.alerting_handler(
-                    message=f"LLM API call failed: {exception_str}",
+                    message=f"LLM API call failed: `{exception_str}`",
                     level="High",
                     alert_type="llm_exceptions",
                     request_data=request_data,

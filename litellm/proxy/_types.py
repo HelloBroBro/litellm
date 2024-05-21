@@ -251,6 +251,10 @@ class LiteLLMPromptInjectionParams(LiteLLMBase):
     llm_api_name: Optional[str] = None
     llm_api_system_prompt: Optional[str] = None
     llm_api_fail_call_string: Optional[str] = None
+    reject_as_response: Optional[bool] = Field(
+        default=False,
+        description="Return rejected request error message as a string to the user. Default behaviour is to raise an exception.",
+    )
 
     @root_validator(pre=True)
     def check_llm_api_params(cls, values):
@@ -1026,3 +1030,17 @@ class TokenCountResponse(LiteLLMBase):
     request_model: str
     model_used: str
     tokenizer_type: str
+
+
+class CallInfo(LiteLLMBase):
+    """Used for slack budget alerting"""
+
+    spend: float
+    max_budget: float
+    token: str = Field(description="Hashed value of that key")
+    user_id: Optional[str] = None
+    team_id: Optional[str] = None
+    user_email: Optional[str] = None
+    key_alias: Optional[str] = None
+    projected_exceeded_date: Optional[str] = None
+    projected_spend: Optional[float] = None
