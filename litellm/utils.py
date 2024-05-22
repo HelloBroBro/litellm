@@ -6,7 +6,6 @@
 # +-----------------------------------------------+
 #
 #  Thank you users! We ❤️ you! - Krrish & Ishaan
-
 import sys, re, binascii, struct
 import litellm
 import dotenv, json, traceback, threading, base64, ast
@@ -73,6 +72,7 @@ from .integrations.supabase import Supabase
 from .integrations.lunary import LunaryLogger
 from .integrations.prompt_layer import PromptLayerLogger
 from .integrations.langsmith import LangsmithLogger
+from .integrations.logfire_logger import LogfireLogger, LogfireLevel
 from .integrations.weights_biases import WeightsBiasesLogger
 from .integrations.custom_logger import CustomLogger
 from .integrations.langfuse import LangFuseLogger
@@ -146,6 +146,7 @@ heliconeLogger = None
 athinaLogger = None
 promptLayerLogger = None
 langsmithLogger = None
+logfireLogger = None
 weightsBiasesLogger = None
 customLogger = None
 langFuseLogger = None
@@ -1130,7 +1131,7 @@ class CallTypes(Enum):
 
 # Logging function -> log the exact model details + what's being sent | Non-BlockingP
 class Logging:
-    global supabaseClient, liteDebuggerClient, promptLayerLogger, weightsBiasesLogger, langsmithLogger, capture_exception, add_breadcrumb, lunaryLogger
+    global supabaseClient, liteDebuggerClient, promptLayerLogger, weightsBiasesLogger, langsmithLogger, logfireLogger, capture_exception, add_breadcrumb, lunaryLogger
 
     custom_pricing: bool = False
 
@@ -1672,7 +1673,7 @@ class Logging:
                         # this only logs streaming once, complete_streaming_response exists i.e when stream ends
                         if self.stream:
                             if "complete_streaming_response" not in kwargs:
-                                return
+                                continue
                             else:
                                 print_verbose("reaches supabase for streaming logging!")
                                 result = kwargs["complete_streaming_response"]
@@ -1706,7 +1707,7 @@ class Logging:
                         print_verbose("reaches langsmith for logging!")
                         if self.stream:
                             if "complete_streaming_response" not in kwargs:
-                                break
+                                continue
                             else:
                                 print_verbose(
                                     "reaches langsmith for streaming logging!"
@@ -1719,6 +1720,33 @@ class Logging:
                             end_time=end_time,
                             print_verbose=print_verbose,
                         )
+                    if callback == "logfire":
+                        global logfireLogger
+                        verbose_logger.debug("reaches logfire for success logging!")
+                        kwargs = {}
+                        for k, v in self.model_call_details.items():
+                            if (
+                                k != "original_response"
+                            ):  # copy.deepcopy raises errors as this could be a coroutine
+                                kwargs[k] = v
+
+                        # this only logs streaming once, complete_streaming_response exists i.e when stream ends
+                        if self.stream:
+                            if "complete_streaming_response" not in kwargs:
+                                continue
+                            else:
+                                print_verbose("reaches logfire for streaming logging!")
+                                result = kwargs["complete_streaming_response"]
+
+                        logfireLogger.log_event(
+                            kwargs=self.model_call_details,
+                            response_obj=result,
+                            start_time=start_time,
+                            end_time=end_time,
+                            print_verbose=print_verbose,
+                            level=LogfireLevel.INFO.value,
+                        )
+
                     if callback == "lunary":
                         print_verbose("reaches lunary for logging!")
                         model = self.model
@@ -1735,7 +1763,7 @@ class Logging:
                         # this only logs streaming once, complete_streaming_response exists i.e when stream ends
                         if self.stream:
                             if "complete_streaming_response" not in kwargs:
-                                break
+                                continue
                             else:
                                 result = kwargs["complete_streaming_response"]
 
@@ -1880,7 +1908,7 @@ class Logging:
                                 f"is complete_streaming_response in kwargs: {kwargs.get('complete_streaming_response', None)}"
                             )
                             if complete_streaming_response is None:
-                                break
+                                continue
                             else:
                                 print_verbose("reaches langfuse for streaming logging!")
                                 result = kwargs["complete_streaming_response"]
@@ -1909,7 +1937,7 @@ class Logging:
                                 f"is complete_streaming_response in kwargs: {kwargs.get('complete_streaming_response', None)}"
                             )
                             if complete_streaming_response is None:
-                                break
+                                continue
                             else:
                                 print_verbose(
                                     "reaches clickhouse for streaming logging!"
@@ -1938,7 +1966,7 @@ class Logging:
                                 f"is complete_streaming_response in kwargs: {kwargs.get('complete_streaming_response', None)}"
                             )
                             if complete_streaming_response is None:
-                                break
+                                continue
                             else:
                                 print_verbose(
                                     "reaches greenscale for streaming logging!"
@@ -2409,7 +2437,9 @@ class Logging:
     def failure_handler(
         self, exception, traceback_exception, start_time=None, end_time=None
     ):
-        print_verbose(f"Logging Details LiteLLM-Failure Call")
+        print_verbose(
+            f"Logging Details LiteLLM-Failure Call: {litellm.failure_callback}"
+        )
         try:
             start_time, end_time = self._failure_handler_helper_fn(
                 exception=exception,
@@ -2464,7 +2494,7 @@ class Logging:
                             call_type=self.call_type,
                             stream=self.stream,
                         )
-                    elif callback == "lunary":
+                    if callback == "lunary":
                         print_verbose("reaches lunary for logging error!")
 
                         model = self.model
@@ -2489,7 +2519,7 @@ class Logging:
                             end_time=end_time,
                             print_verbose=print_verbose,
                         )
-                    elif callback == "sentry":
+                    if callback == "sentry":
                         print_verbose("sending exception to sentry")
                         if capture_exception:
                             capture_exception(exception)
@@ -2497,7 +2527,7 @@ class Logging:
                             print_verbose(
                                 f"capture exception not initialized: {capture_exception}"
                             )
-                    elif callable(callback):  # custom logger functions
+                    if callable(callback):  # custom logger functions
                         customLogger.log_event(
                             kwargs=self.model_call_details,
                             response_obj=result,
@@ -2506,7 +2536,7 @@ class Logging:
                             print_verbose=print_verbose,
                             callback_func=callback,
                         )
-                    elif (
+                    if (
                         isinstance(callback, CustomLogger)
                         and self.model_call_details.get("litellm_params", {}).get(
                             "acompletion", False
@@ -2523,7 +2553,7 @@ class Logging:
                             response_obj=result,
                             kwargs=self.model_call_details,
                         )
-                    elif callback == "langfuse":
+                    if callback == "langfuse":
                         global langFuseLogger
                         verbose_logger.debug("reaches langfuse for logging failure")
                         kwargs = {}
@@ -2559,7 +2589,7 @@ class Logging:
                             level="ERROR",
                             kwargs=self.model_call_details,
                         )
-                    elif callback == "prometheus":
+                    if callback == "prometheus":
                         global prometheusLogger
                         verbose_logger.debug("reaches prometheus for success logging!")
                         kwargs = {}
@@ -2575,6 +2605,26 @@ class Logging:
                             start_time=start_time,
                             end_time=end_time,
                             user_id=kwargs.get("user", None),
+                            print_verbose=print_verbose,
+                        )
+
+                    if callback == "logfire":
+                        global logfireLogger
+                        verbose_logger.debug("reaches logfire for failure logging!")
+                        kwargs = {}
+                        for k, v in self.model_call_details.items():
+                            if (
+                                k != "original_response"
+                            ):  # copy.deepcopy raises errors as this could be a coroutine
+                                kwargs[k] = v
+                        kwargs["exception"] = exception
+
+                        logfireLogger.log_event(
+                            kwargs=kwargs,
+                            response_obj=result,
+                            start_time=start_time,
+                            end_time=end_time,
+                            level=LogfireLevel.ERROR.value,
                             print_verbose=print_verbose,
                         )
                 except Exception as e:
@@ -3343,6 +3393,7 @@ def client(original_function):
                     return original_function(*args, **kwargs)
             traceback_exception = traceback.format_exc()
             end_time = datetime.datetime.now()
+
             # LOG FAILURE - handle streaming failure logging in the _next_ object, remove `handle_failure` once it's deprecated
             if logging_obj:
                 logging_obj.failure_handler(
@@ -5760,7 +5811,7 @@ def get_optional_params(
             "mistralai/Mistral-7B-Instruct-v0.1",
             "mistralai/Mixtral-8x7B-Instruct-v0.1",
         ]:
-            supported_params += [
+            supported_params += [  # type: ignore
                 "functions",
                 "function_call",
                 "tools",
@@ -6010,6 +6061,47 @@ def get_optional_params(
     return optional_params
 
 
+def get_non_default_params(passed_params: dict) -> dict:
+    default_params = {
+        "functions": None,
+        "function_call": None,
+        "temperature": None,
+        "top_p": None,
+        "n": None,
+        "stream": None,
+        "stream_options": None,
+        "stop": None,
+        "max_tokens": None,
+        "presence_penalty": None,
+        "frequency_penalty": None,
+        "logit_bias": None,
+        "user": None,
+        "model": None,
+        "custom_llm_provider": "",
+        "response_format": None,
+        "seed": None,
+        "tools": None,
+        "tool_choice": None,
+        "max_retries": None,
+        "logprobs": None,
+        "top_logprobs": None,
+        "extra_headers": None,
+    }
+    # filter out those parameters that were passed with non-default values
+    non_default_params = {
+        k: v
+        for k, v in passed_params.items()
+        if (
+            k != "model"
+            and k != "custom_llm_provider"
+            and k in default_params
+            and v != default_params[k]
+        )
+    }
+
+    return non_default_params
+
+
 def calculate_max_parallel_requests(
     max_parallel_requests: Optional[int],
     rpm: Optional[int],
@@ -6236,7 +6328,7 @@ def get_first_chars_messages(kwargs: dict) -> str:
         return ""
 
 
-def get_supported_openai_params(model: str, custom_llm_provider: str):
+def get_supported_openai_params(model: str, custom_llm_provider: str) -> Optional[list]:
     """
     Returns the supported openai params for a given model + provider
 
@@ -6244,6 +6336,10 @@ def get_supported_openai_params(model: str, custom_llm_provider: str):
     ```
     get_supported_openai_params(model="anthropic.claude-3", custom_llm_provider="bedrock")
     ```
+
+    Returns:
+    - List if custom_llm_provider is mapped
+    - None if unmapped
     """
     if custom_llm_provider == "bedrock":
         if model.startswith("anthropic.claude-3"):
@@ -6482,6 +6578,8 @@ def get_supported_openai_params(model: str, custom_llm_provider: str):
         ]
     elif custom_llm_provider == "watsonx":
         return litellm.IBMWatsonXAIConfig().get_supported_openai_params()
+
+    return None
 
 
 def get_formatted_prompt(
@@ -7441,7 +7539,7 @@ def validate_environment(model: Optional[str] = None) -> dict:
 
 def set_callbacks(callback_list, function_id=None):
 
-    global sentry_sdk_instance, capture_exception, add_breadcrumb, posthog, slack_app, alerts_channel, traceloopLogger, athinaLogger, heliconeLogger, aispendLogger, berrispendLogger, supabaseClient, liteDebuggerClient, lunaryLogger, promptLayerLogger, langFuseLogger, customLogger, weightsBiasesLogger, langsmithLogger, dynamoLogger, s3Logger, dataDogLogger, prometheusLogger, greenscaleLogger, openMeterLogger
+    global sentry_sdk_instance, capture_exception, add_breadcrumb, posthog, slack_app, alerts_channel, traceloopLogger, athinaLogger, heliconeLogger, aispendLogger, berrispendLogger, supabaseClient, liteDebuggerClient, lunaryLogger, promptLayerLogger, langFuseLogger, customLogger, weightsBiasesLogger, langsmithLogger, logfireLogger, dynamoLogger, s3Logger, dataDogLogger, prometheusLogger, greenscaleLogger, openMeterLogger
 
     try:
         for callback in callback_list:
@@ -7523,6 +7621,8 @@ def set_callbacks(callback_list, function_id=None):
                 weightsBiasesLogger = WeightsBiasesLogger()
             elif callback == "langsmith":
                 langsmithLogger = LangsmithLogger()
+            elif callback == "logfire":
+                logfireLogger = LogfireLogger()
             elif callback == "aispend":
                 aispendLogger = AISpendLogger()
             elif callback == "berrispend":
@@ -10027,7 +10127,14 @@ class CustomStreamWrapper:
         self.sent_last_chunk = False
         self.system_fingerprint: Optional[str] = None
         self.received_finish_reason: Optional[str] = None
-        self.special_tokens = ["<|assistant|>", "<|system|>", "<|user|>", "<s>", "</s>"]
+        self.special_tokens = [
+            "<|assistant|>",
+            "<|system|>",
+            "<|user|>",
+            "<s>",
+            "</s>",
+            "<|im_end|>",
+        ]
         self.holding_chunk = ""
         self.complete_response = ""
         self.response_uptil_now = ""
