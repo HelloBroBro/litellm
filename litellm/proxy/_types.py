@@ -563,6 +563,7 @@ class GlobalEndUsersSpend(LiteLLMBase):
 class TeamMemberAddRequest(LiteLLMBase):
     team_id: str
     member: Member
+    max_budget_in_team: Optional[float] = None  # Users max budget within the team
 
 
 class TeamMemberDeleteRequest(LiteLLMBase):
@@ -647,6 +648,20 @@ class LiteLLM_BudgetTable(LiteLLMBase):
         protected_namespaces = ()
 
 
+class LiteLLM_TeamMemberTable(LiteLLM_BudgetTable):
+    """
+    Used to track spend of a user_id within a team_id
+    """
+
+    spend: Optional[float] = None
+    user_id: Optional[str] = None
+    team_id: Optional[str] = None
+    budget_id: Optional[str] = None
+
+    class Config:
+        protected_namespaces = ()
+
+
 class NewOrganizationRequest(LiteLLM_BudgetTable):
     organization_id: Optional[str] = None
     organization_alias: str
@@ -676,8 +691,37 @@ class OrganizationRequest(LiteLLMBase):
     organizations: List[str]
 
 
+class BudgetNew(LiteLLMBase):
+    budget_id: str = Field(default=None, description="The unique budget id.")
+    max_budget: Optional[float] = Field(
+        default=None,
+        description="Requests will fail if this budget (in USD) is exceeded.",
+    )
+    soft_budget: Optional[float] = Field(
+        default=None,
+        description="Requests will NOT fail if this is exceeded. Will fire alerting though.",
+    )
+    max_parallel_requests: Optional[int] = Field(
+        default=None, description="Max concurrent requests allowed for this budget id."
+    )
+    tpm_limit: Optional[int] = Field(
+        default=None, description="Max tokens per minute, allowed for this budget id."
+    )
+    rpm_limit: Optional[int] = Field(
+        default=None, description="Max requests per minute, allowed for this budget id."
+    )
+    budget_duration: Optional[str] = Field(
+        default=None,
+        description="Max duration budget should be set for (e.g. '1hr', '1d', '28d')",
+    )
+
+
 class BudgetRequest(LiteLLMBase):
     budgets: List[str]
+
+
+class BudgetDeleteRequest(LiteLLMBase):
+    id: str
 
 
 class KeyManagementSystem(enum.Enum):
@@ -912,6 +956,12 @@ class LiteLLM_VerificationTokenView(LiteLLM_VerificationToken):
     team_blocked: bool = False
     soft_budget: Optional[float] = None
     team_model_aliases: Optional[Dict] = None
+    team_member_spend: Optional[float] = None
+
+    # End User Params
+    end_user_id: Optional[str] = None
+    end_user_tpm_limit: Optional[int] = None
+    end_user_rpm_limit: Optional[int] = None
 
 
 class UserAPIKeyAuth(

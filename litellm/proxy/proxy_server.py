@@ -174,7 +174,6 @@ except Exception as e:
 
 _license_check = LicenseCheck()
 premium_user: bool = _license_check.is_premium()
-
 ui_link = f"/ui/"
 ui_message = (
     f"👉 [```LiteLLM Admin Panel on /ui```]({ui_link}). Create, Edit Keys with SSO"
@@ -498,7 +497,7 @@ async def user_api_key_auth(
                         litellm_proxy_roles=jwt_handler.litellm_jwtauth,
                     )
                     if is_allowed:
-                        return UserAPIKeyAuth()
+                        return UserAPIKeyAuth(user_role="proxy_admin")
                     else:
                         allowed_routes = (
                             jwt_handler.litellm_jwtauth.admin_allowed_routes
@@ -655,19 +654,6 @@ async def user_api_key_auth(
                     detail="'allow_user_auth' not set or set to False",
                 )
 
-        ### CHECK IF ADMIN ###
-        # note: never string compare api keys, this is vulenerable to a time attack. Use secrets.compare_digest instead
-        ### CHECK IF ADMIN ###
-        # note: never string compare api keys, this is vulenerable to a time attack. Use secrets.compare_digest instead
-        ## Check CACHE
-        valid_token = user_api_key_cache.get_cache(key=hash_token(api_key))
-        if (
-            valid_token is not None
-            and isinstance(valid_token, UserAPIKeyAuth)
-            and valid_token.user_role == "proxy_admin"
-        ):
-            return valid_token
-
         ## Check END-USER OBJECT
         request_data = await _read_request_body(request=request)
         _end_user_object = None
@@ -683,11 +669,43 @@ async def user_api_key_auth(
                     end_user_params["allowed_model_region"] = (
                         _end_user_object.allowed_model_region
                     )
+                    if _end_user_object.litellm_budget_table is not None:
+                        budget_info = _end_user_object.litellm_budget_table
+                        end_user_params["end_user_id"] = _end_user_object.user_id
+                        if budget_info.tpm_limit is not None:
+                            end_user_params["end_user_tpm_limit"] = (
+                                budget_info.tpm_limit
+                            )
+                        if budget_info.rpm_limit is not None:
+                            end_user_params["end_user_rpm_limit"] = (
+                                budget_info.rpm_limit
+                            )
             except Exception as e:
                 verbose_proxy_logger.debug(
                     "Unable to find user in db. Error - {}".format(str(e))
                 )
                 pass
+
+        ### CHECK IF ADMIN ###
+        # note: never string compare api keys, this is vulenerable to a time attack. Use secrets.compare_digest instead
+        ### CHECK IF ADMIN ###
+        # note: never string compare api keys, this is vulenerable to a time attack. Use secrets.compare_digest instead
+        ## Check CACHE
+        valid_token = user_api_key_cache.get_cache(key=hash_token(api_key))
+        if (
+            valid_token is not None
+            and isinstance(valid_token, UserAPIKeyAuth)
+            and valid_token.user_role == "proxy_admin"
+        ):
+            # update end-user params on valid token
+            valid_token.end_user_id = end_user_params.get("end_user_id")
+            valid_token.end_user_tpm_limit = end_user_params.get("end_user_tpm_limit")
+            valid_token.end_user_rpm_limit = end_user_params.get("end_user_rpm_limit")
+            valid_token.allowed_model_region = end_user_params.get(
+                "allowed_model_region"
+            )
+
+            return valid_token
 
         try:
             is_master_key_valid = secrets.compare_digest(api_key, master_key)  # type: ignore
@@ -761,8 +779,17 @@ async def user_api_key_auth(
                         key=original_api_key, table_name="key"
                     )
             verbose_proxy_logger.debug("Token from db: %s", valid_token)
-        elif valid_token is not None:
+        elif valid_token is not None and isinstance(valid_token, UserAPIKeyAuth):
             verbose_proxy_logger.debug("API Key Cache Hit!")
+
+            # update end-user params on valid token
+            # These can change per request - it's important to update them here
+            valid_token.end_user_id = end_user_params.get("end_user_id")
+            valid_token.end_user_tpm_limit = end_user_params.get("end_user_tpm_limit")
+            valid_token.end_user_rpm_limit = end_user_params.get("end_user_rpm_limit")
+            valid_token.allowed_model_region = end_user_params.get(
+                "allowed_model_region"
+            )
 
         user_id_information = None
         if valid_token:
@@ -770,12 +797,13 @@ async def user_api_key_auth(
             # Run checks for
             # 1. If token can call model
             # 2. If user_id for this token is in budget
-            # 3. If 'user' passed to /chat/completions, /embeddings endpoint is in budget
-            # 4. If token is expired
-            # 5. If token spend is under Budget for the token
-            # 6. If token spend per model is under budget per model
-            # 7. If token spend is under team budget
-            # 8. If team spend is under team budget
+            # 3. If the user spend within their own team is within budget
+            # 4. If 'user' passed to /chat/completions, /embeddings endpoint is in budget
+            # 5. If token is expired
+            # 6. If token spend is under Budget for the token
+            # 7. If token spend per model is under budget per model
+            # 8. If token spend is under team budget
+            # 9. If team spend is under team budget
 
             # Check 1. If token can call model
             _model_alias_map = {}
@@ -973,6 +1001,43 @@ async def user_api_key_auth(
                                 raise Exception(
                                     f"ExceededBudget: User {valid_token.user_id} has exceeded their budget. Current spend: {user_current_spend}; Max Budget: {user_max_budget}"
                                 )
+            # Check 3. Check if user is in their team budget
+            if valid_token.team_member_spend is not None:
+                if prisma_client is not None:
+
+                    _cache_key = f"{valid_token.team_id}_{valid_token.user_id}"
+
+                    team_member_info = await user_api_key_cache.async_get_cache(
+                        key=_cache_key
+                    )
+                    if team_member_info is None:
+                        team_member_info = (
+                            await prisma_client.db.litellm_teammembership.find_first(
+                                where={
+                                    "user_id": valid_token.user_id,
+                                    "team_id": valid_token.team_id,
+                                },  # type: ignore
+                                include={"litellm_budget_table": True},
+                            )
+                        )
+                        await user_api_key_cache.async_set_cache(
+                            key=_cache_key,
+                            value=team_member_info,
+                            ttl=UserAPIKeyCacheTTLEnum.user_information_cache.value,
+                        )
+
+                    if (
+                        team_member_info is not None
+                        and team_member_info.litellm_budget_table is not None
+                    ):
+                        team_member_budget = (
+                            team_member_info.litellm_budget_table.max_budget
+                        )
+                        if team_member_budget is not None and team_member_budget > 0:
+                            if valid_token.team_member_spend > team_member_budget:
+                                raise Exception(
+                                    f"ExceededBudget: Crossed spend within team. UserID: {valid_token.user_id}, in team {valid_token.team_id} has exceeded their budget. Current spend: {valid_token.team_member_spend}; Max Budget: {team_member_budget}"
+                                )
 
             # Check 3. If token is expired
             if valid_token.expires is not None:
@@ -1148,10 +1213,7 @@ async def user_api_key_auth(
             valid_token_dict.pop("token", None)
 
             if _end_user_object is not None:
-                valid_token_dict["allowed_model_region"] = (
-                    _end_user_object.allowed_model_region
-                )
-
+                valid_token_dict.update(end_user_params)
             """
             asyncio create task to update the user api key cache with the user db table as well
 
@@ -1677,6 +1739,19 @@ async def update_database(
                         response_cost
                         + prisma_client.team_list_transactons.get(team_id, 0)
                     )
+
+                    try:
+                        # Track spend of the team member within this team
+                        # key is "team_id::<value>::user_id::<value>"
+                        team_member_key = f"team_id::{team_id}::user_id::{user_id}"
+                        prisma_client.team_member_list_transactons[team_member_key] = (
+                            response_cost
+                            + prisma_client.team_member_list_transactons.get(
+                                team_member_key, 0
+                            )
+                        )
+                    except:
+                        pass
             except Exception as e:
                 verbose_proxy_logger.info(
                     f"Update Team DB failed to execute - {str(e)}\n{traceback.format_exc()}"
@@ -1807,6 +1882,16 @@ async def update_cache(
             existing_team_spend = existing_spend_obj.team_spend or 0
             # Calculate the new cost by adding the existing cost and response_cost
             existing_spend_obj.team_spend = existing_team_spend + response_cost
+
+        if (
+            existing_spend_obj is not None
+            and getattr(existing_spend_obj, "team_member_spend", None) is not None
+        ):
+            existing_team_member_spend = existing_spend_obj.team_member_spend or 0
+            # Calculate the new cost by adding the existing cost and response_cost
+            existing_spend_obj.team_member_spend = (
+                existing_team_member_spend + response_cost
+            )
 
         # Update the cost column for the given token
         existing_spend_obj.spend = new_spend
@@ -2805,11 +2890,18 @@ class ProxyConfig:
         config_data = await proxy_config.get_config()
         litellm_settings = config_data.get("litellm_settings", {}) or {}
         success_callbacks = litellm_settings.get("success_callback", None)
+        failure_callbacks = litellm_settings.get("failure_callback", None)
 
         if success_callbacks is not None and isinstance(success_callbacks, list):
             for success_callback in success_callbacks:
                 if success_callback not in litellm.success_callback:
                     litellm.success_callback.append(success_callback)
+
+        # Add failure callbacks from DB to litellm
+        if failure_callbacks is not None and isinstance(failure_callbacks, list):
+            for failure_callback in failure_callbacks:
+                if failure_callback not in litellm.failure_callback:
+                    litellm.failure_callback.append(failure_callback)
         # we need to set env variables too
         environment_variables = config_data.get("environment_variables", {})
         for k, v in environment_variables.items():
@@ -3463,7 +3555,9 @@ async def startup_event():
     if prisma_client is not None and master_key is not None:
         # add master key to db
         if os.getenv("PROXY_ADMIN_ID", None) is not None:
-            litellm_proxy_admin_name = os.getenv("PROXY_ADMIN_ID")
+            litellm_proxy_admin_name = os.getenv(
+                "PROXY_ADMIN_ID", litellm_proxy_admin_name
+            )
         asyncio.create_task(
             generate_key_helper_fn(
                 duration=None,
@@ -7360,7 +7454,7 @@ async def new_team(
 
     Example Request:
     ```
-    curl --location 'http://0.0.0.0:8000/team/new' \
+    curl --location 'http://0.0.0.0:4000/team/new' \
 
     --header 'Authorization: Bearer sk-1234' \
 
@@ -7381,6 +7475,18 @@ async def new_team(
 
     if data.team_id is None:
         data.team_id = str(uuid.uuid4())
+    else:
+        # Check if team_id exists already
+        _existing_team_id = await prisma_client.get_data(
+            team_id=data.team_id, table_name="team", query_type="find_unique"
+        )
+        if _existing_team_id is not None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": f"Team id = {data.team_id} already exists. Please use a different team id."
+                },
+            )
 
     if (
         user_api_key_dict.user_role is None
@@ -7571,16 +7677,12 @@ async def team_member_add(
     If user doesn't exist, new user row will also be added to User Table
 
     ```
-    curl -X POST 'http://0.0.0.0:8000/team/update' \
 
+    curl -X POST 'http://0.0.0.0:4000/team/member_add' \
     -H 'Authorization: Bearer sk-1234' \
-
     -H 'Content-Type: application/json' \
+    -d '{"team_id": "45e3e396-ee08-4a61-a88e-16b3ce7e0849", "member": {"role": "user", "user_id": "krrish247652@berri.ai"}}'
 
-    -D '{
-        "team_id": "45e3e396-ee08-4a61-a88e-16b3ce7e0849",
-        "member": {"role": "user", "user_id": "krrish247652@berri.ai"}
-    }'
     ```
     """
     if prisma_client is None:
@@ -7650,6 +7752,26 @@ async def team_member_add(
         ):
 
             await prisma_client.insert_data(data=user_data, table_name="user")
+
+    # Check if trying to set a budget for team member
+    if data.max_budget_in_team is not None and new_member.user_id is not None:
+        # create a new budget item for this member
+        response = await prisma_client.db.litellm_budgettable.create(
+            data={
+                "max_budget": data.max_budget_in_team,
+                "created_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
+                "updated_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
+            }
+        )
+
+        _budget_id = response.budget_id
+        await prisma_client.db.litellm_teammembership.create(
+            data={
+                "team_id": data.team_id,
+                "user_id": new_member.user_id,
+                "budget_id": _budget_id,
+            }
+        )
 
     return team_row
 
@@ -8181,8 +8303,39 @@ async def info_organization(data: OrganizationRequest):
 
 
 @router.post(
+    "/budget/new",
+    tags=["budget management"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def new_budget(
+    budget_obj: BudgetNew,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """
+    Create a new budget object. Can apply this to teams, orgs, end-users, keys.
+    """
+    global prisma_client
+
+    if prisma_client is None:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": CommonProxyErrors.db_not_connected_error.value},
+        )
+
+    response = await prisma_client.db.litellm_budgettable.create(
+        data={
+            **budget_obj.model_dump(exclude_none=True),  # type: ignore
+            "created_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
+            "updated_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
+        }  # type: ignore
+    )
+
+    return response
+
+
+@router.post(
     "/budget/info",
-    tags=["organization management"],
+    tags=["budget management"],
     dependencies=[Depends(user_api_key_auth)],
 )
 async def info_budget(data: BudgetRequest):
@@ -8203,6 +8356,142 @@ async def info_budget(data: BudgetRequest):
         )
     response = await prisma_client.db.litellm_budgettable.find_many(
         where={"budget_id": {"in": data.budgets}},
+    )
+
+    return response
+
+
+@router.get(
+    "/budget/settings",
+    tags=["budget management"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def budget_settings(
+    budget_id: str,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """
+    Get list of configurable params + current value for a budget item + description of each field
+
+    Used on Admin UI.
+    """
+    if prisma_client is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": CommonProxyErrors.db_not_connected_error.value},
+        )
+
+    if user_api_key_dict.user_role != "proxy_admin":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "{}, your role={}".format(
+                    CommonProxyErrors.not_allowed_access.value,
+                    user_api_key_dict.user_role,
+                )
+            },
+        )
+
+    ## get budget item from db
+    db_budget_row = await prisma_client.db.litellm_budgettable.find_first(
+        where={"budget_id": budget_id}
+    )
+
+    if db_budget_row is not None:
+        db_budget_row_dict = db_budget_row.model_dump(exclude_none=True)
+    else:
+        db_budget_row_dict = {}
+
+    allowed_args = {
+        "max_parallel_requests": {"type": "Integer"},
+        "tpm_limit": {"type": "Integer"},
+        "rpm_limit": {"type": "Integer"},
+        "budget_duration": {"type": "String"},
+        "max_budget": {"type": "Float"},
+        "soft_budget": {"type": "Float"},
+    }
+
+    return_val = []
+
+    for field_name, field_info in BudgetNew.model_fields.items():
+        if field_name in allowed_args:
+
+            _stored_in_db = True
+
+            _response_obj = ConfigList(
+                field_name=field_name,
+                field_type=allowed_args[field_name]["type"],
+                field_description=field_info.description or "",
+                field_value=db_budget_row_dict.get(field_name, None),
+                stored_in_db=_stored_in_db,
+            )
+            return_val.append(_response_obj)
+
+    return return_val
+
+
+@router.get(
+    "/budget/list",
+    tags=["budget management"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def list_budget(
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """List all the created budgets in proxy db. Used on Admin UI."""
+    if prisma_client is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": CommonProxyErrors.db_not_connected_error.value},
+        )
+
+    if user_api_key_dict.user_role != "proxy_admin":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "{}, your role={}".format(
+                    CommonProxyErrors.not_allowed_access.value,
+                    user_api_key_dict.user_role,
+                )
+            },
+        )
+
+    response = await prisma_client.db.litellm_budgettable.find_many()
+
+    return response
+
+
+@router.post(
+    "/budget/delete",
+    tags=["budget management"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def delete_budget(
+    data: BudgetDeleteRequest,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """Delete budget"""
+    global prisma_client
+
+    if prisma_client is None:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": CommonProxyErrors.db_not_connected_error.value},
+        )
+
+    if user_api_key_dict.user_role != "proxy_admin":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "{}, your role={}".format(
+                    CommonProxyErrors.not_allowed_access.value,
+                    user_api_key_dict.user_role,
+                )
+            },
+        )
+
+    response = await prisma_client.db.litellm_budgettable.delete(
+        where={"budget_id": data.id}
     )
 
     return response
@@ -8526,6 +8815,102 @@ async def model_info_v2(
 
 
 @router.get(
+    "/model/streaming_metrics",
+    description="View time to first token for models in spend logs",
+    tags=["model management"],
+    include_in_schema=False,
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def model_streaming_metrics(
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+    _selected_model_group: Optional[str] = None,
+    startTime: Optional[datetime] = None,
+    endTime: Optional[datetime] = None,
+):
+    global prisma_client, llm_router
+    if prisma_client is None:
+        raise ProxyException(
+            message=CommonProxyErrors.db_not_connected_error.value,
+            type="internal_error",
+            param="None",
+            code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    startTime = startTime or datetime.now() - timedelta(days=7)  # show over past week
+    endTime = endTime or datetime.now()
+
+    sql_query = """
+        SELECT
+            api_base,
+            model_group,
+            model,
+            DATE_TRUNC('day', "startTime")::DATE AS day,
+            AVG(EXTRACT(epoch FROM ("completionStartTime" - "startTime")))  AS time_to_first_token
+        FROM
+            "LiteLLM_SpendLogs"
+        WHERE
+            "startTime" BETWEEN $2::timestamp AND $3::timestamp
+            AND "model_group" = $1 AND "cache_hit" != 'True'
+            AND "completionStartTime" IS NOT NULL
+            AND "completionStartTime" != "endTime"
+        GROUP BY
+            api_base,
+            model_group,
+            model,
+            day
+        ORDER BY
+            time_to_first_token DESC;
+    """
+
+    _all_api_bases = set()
+    db_response = await prisma_client.db.query_raw(
+        sql_query, _selected_model_group, startTime, endTime
+    )
+    _daily_entries: dict = {}  # {"Jun 23": {"model1": 0.002, "model2": 0.003}}
+    if db_response is not None:
+        for model_data in db_response:
+            _api_base = model_data["api_base"]
+            _model = model_data["model"]
+            _day = model_data["day"]
+            time_to_first_token = model_data["time_to_first_token"]
+            if _day not in _daily_entries:
+                _daily_entries[_day] = {}
+            _combined_model_name = str(_model)
+            if "https://" in _api_base:
+                _combined_model_name = str(_api_base)
+            if "/openai/" in _combined_model_name:
+                _combined_model_name = _combined_model_name.split("/openai/")[0]
+
+            _all_api_bases.add(_combined_model_name)
+            _daily_entries[_day][_combined_model_name] = time_to_first_token
+
+        """
+        each entry needs to be like this:
+        {
+            date: 'Jun 23',
+            'gpt-4-https://api.openai.com/v1/': 0.002,
+            'gpt-43-https://api.openai.com-12/v1/': 0.002,
+        }
+        """
+        # convert daily entries to list of dicts
+
+        response: List[dict] = []
+
+        # sort daily entries by date
+        _daily_entries = dict(sorted(_daily_entries.items(), key=lambda item: item[0]))
+        for day in _daily_entries:
+            entry = {"date": str(day)}
+            for model_key, latency in _daily_entries[day].items():
+                entry[model_key] = latency
+            response.append(entry)
+
+        return {
+            "data": response,
+            "all_api_bases": list(_all_api_bases),
+        }
+
+
+@router.get(
     "/model/metrics",
     description="View number of requests & avg latency per model on config.yaml",
     tags=["model management"],
@@ -8552,6 +8937,7 @@ async def model_metrics(
     sql_query = """
         SELECT
             api_base,
+            model_group,
             model,
             DATE_TRUNC('day', "startTime")::DATE AS day,
             AVG(EXTRACT(epoch FROM ("endTime" - "startTime"))) / SUM(total_tokens) AS avg_latency_per_token
@@ -8559,9 +8945,10 @@ async def model_metrics(
             "LiteLLM_SpendLogs"
         WHERE
             "startTime" BETWEEN $2::timestamp AND $3::timestamp
-            AND "model" = $1 AND "cache_hit" != 'True'
+            AND "model_group" = $1 AND "cache_hit" != 'True'
         GROUP BY
             api_base,
+            model_group,
             model,
             day
         HAVING
@@ -8574,6 +8961,7 @@ async def model_metrics(
         sql_query, _selected_model_group, startTime, endTime
     )
     _daily_entries: dict = {}  # {"Jun 23": {"model1": 0.002, "model2": 0.003}}
+
     if db_response is not None:
         for model_data in db_response:
             _api_base = model_data["api_base"]
@@ -8657,7 +9045,7 @@ SELECT
 FROM
     "LiteLLM_SpendLogs"
 WHERE
-    "model" = $2
+    "model_group" = $2
     AND "cache_hit" != 'True'
     AND "startTime" >= $3::timestamp
     AND "startTime" <= $4::timestamp
@@ -9271,6 +9659,7 @@ async def fallback_login(request: Request):
     "/login", include_in_schema=False
 )  # hidden since this is a helper for UI sso login
 async def login(request: Request):
+    global premium_user
     try:
         import multipart
     except ImportError:
@@ -9346,6 +9735,7 @@ async def login(request: Request):
                 "user_email": user_id,
                 "user_role": "app_admin",  # this is the path without sso - we can assume only admins will use this
                 "login_method": "username_password",
+                "premium_user": premium_user,
             },
             "secret",
             algorithm="HS256",
@@ -9396,7 +9786,7 @@ def get_image():
 @app.get("/sso/callback", tags=["experimental"])
 async def auth_callback(request: Request):
     """Verify login"""
-    global general_settings, ui_access_mode
+    global general_settings, ui_access_mode, premium_user
     microsoft_client_id = os.getenv("MICROSOFT_CLIENT_ID", None)
     google_client_id = os.getenv("GOOGLE_CLIENT_ID", None)
     generic_client_id = os.getenv("GENERIC_CLIENT_ID", None)
@@ -9676,6 +10066,7 @@ async def auth_callback(request: Request):
             "user_email": user_email,
             "user_role": user_role,
             "login_method": "sso",
+            "premium_user": premium_user,
         },
         "secret",
         algorithm="HS256",
