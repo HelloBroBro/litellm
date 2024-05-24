@@ -275,6 +275,7 @@ class CommonProxyErrors(enum.Enum):
     db_not_connected_error = "DB not connected"
     no_llm_router = "No models configured on proxy"
     not_allowed_access = "Admin-only endpoint. Not allowed to access this."
+    not_premium_user = "You must be a LiteLLM Enterprise user to use this feature. If you have a license please set `LITELLM_LICENSE` in your env. If you want to obtain a license meet with us here: https://calendly.com/d/4mp-gd3-k5k/litellm-1-1-onboarding-chat"
 
 
 @app.exception_handler(ProxyException)
@@ -2188,7 +2189,7 @@ class ProxyConfig:
         """
         Load config values into proxy global state
         """
-        global master_key, user_config_file_path, otel_logging, user_custom_auth, user_custom_auth_path, user_custom_key_generate, use_background_health_checks, health_check_interval, use_queue, custom_db_client, proxy_budget_rescheduler_max_time, proxy_budget_rescheduler_min_time, ui_access_mode, litellm_master_key_hash, proxy_batch_write_at, disable_spend_logs, prompt_injection_detection_obj, redis_usage_cache, store_model_in_db
+        global master_key, user_config_file_path, otel_logging, user_custom_auth, user_custom_auth_path, user_custom_key_generate, use_background_health_checks, health_check_interval, use_queue, custom_db_client, proxy_budget_rescheduler_max_time, proxy_budget_rescheduler_min_time, ui_access_mode, litellm_master_key_hash, proxy_batch_write_at, disable_spend_logs, prompt_injection_detection_obj, redis_usage_cache, store_model_in_db, premium_user
 
         # Load existing config
         config = await self.get_config(config_file_path=config_file_path)
@@ -2311,8 +2312,50 @@ class ProxyConfig:
                                     _ENTERPRISE_LlamaGuard,
                                 )
 
+                                if premium_user != True:
+                                    raise Exception(
+                                        "Trying to use Llama Guard"
+                                        + CommonProxyErrors.not_premium_user.value
+                                    )
+
                                 llama_guard_object = _ENTERPRISE_LlamaGuard()
                                 imported_list.append(llama_guard_object)
+                            elif (
+                                isinstance(callback, str)
+                                and callback == "openai_moderations"
+                            ):
+                                from enterprise.enterprise_hooks.openai_moderation import (
+                                    _ENTERPRISE_OpenAI_Moderation,
+                                )
+
+                                if premium_user != True:
+                                    raise Exception(
+                                        "Trying to use OpenAI Moderations Check"
+                                        + CommonProxyErrors.not_premium_user.value
+                                    )
+
+                                openai_moderations_object = (
+                                    _ENTERPRISE_OpenAI_Moderation()
+                                )
+                                imported_list.append(openai_moderations_object)
+                            elif (
+                                isinstance(callback, str)
+                                and callback == "lakera_prompt_injection"
+                            ):
+                                from enterprise.enterprise_hooks.lakera_ai import (
+                                    _ENTERPRISE_lakeraAI_Moderation,
+                                )
+
+                                if premium_user != True:
+                                    raise Exception(
+                                        "Trying to use LakeraAI Prompt Injection"
+                                        + CommonProxyErrors.not_premium_user.value
+                                    )
+
+                                lakera_moderations_object = (
+                                    _ENTERPRISE_lakeraAI_Moderation()
+                                )
+                                imported_list.append(lakera_moderations_object)
                             elif (
                                 isinstance(callback, str)
                                 and callback == "google_text_moderation"
@@ -2320,6 +2363,12 @@ class ProxyConfig:
                                 from enterprise.enterprise_hooks.google_text_moderation import (
                                     _ENTERPRISE_GoogleTextModeration,
                                 )
+
+                                if premium_user != True:
+                                    raise Exception(
+                                        "Trying to use Google Text Moderation"
+                                        + CommonProxyErrors.not_premium_user.value
+                                    )
 
                                 google_text_moderation_obj = (
                                     _ENTERPRISE_GoogleTextModeration()
@@ -2333,6 +2382,12 @@ class ProxyConfig:
                                     _ENTERPRISE_LLMGuard,
                                 )
 
+                                if premium_user != True:
+                                    raise Exception(
+                                        "Trying to use Llm Guard"
+                                        + CommonProxyErrors.not_premium_user.value
+                                    )
+
                                 llm_guard_moderation_obj = _ENTERPRISE_LLMGuard()
                                 imported_list.append(llm_guard_moderation_obj)
                             elif (
@@ -2342,6 +2397,12 @@ class ProxyConfig:
                                 from enterprise.enterprise_hooks.blocked_user_list import (
                                     _ENTERPRISE_BlockedUserList,
                                 )
+
+                                if premium_user != True:
+                                    raise Exception(
+                                        "Trying to use ENTERPRISE BlockedUser"
+                                        + CommonProxyErrors.not_premium_user.value
+                                    )
 
                                 blocked_user_list = _ENTERPRISE_BlockedUserList(
                                     prisma_client=prisma_client
@@ -2354,6 +2415,12 @@ class ProxyConfig:
                                 from enterprise.enterprise_hooks.banned_keywords import (
                                     _ENTERPRISE_BannedKeywords,
                                 )
+
+                                if premium_user != True:
+                                    raise Exception(
+                                        "Trying to use ENTERPRISE BannedKeyword"
+                                        + CommonProxyErrors.not_premium_user.value
+                                    )
 
                                 banned_keywords_obj = _ENTERPRISE_BannedKeywords()
                                 imported_list.append(banned_keywords_obj)
@@ -3390,6 +3457,12 @@ async def async_data_generator(
     try:
         start_time = time.time()
         async for chunk in response:
+
+            ### CALL HOOKS ### - modify outgoing data
+            chunk = await proxy_logging_obj.async_post_call_streaming_hook(
+                user_api_key_dict=user_api_key_dict, response=chunk
+            )
+
             chunk = chunk.model_dump_json(exclude_none=True)
             try:
                 yield f"data: {chunk}\n\n"
@@ -9289,6 +9362,36 @@ async def delete_model(model_info: ModelInfoDelete):
             param=getattr(e, "param", "None"),
             code=status.HTTP_400_BAD_REQUEST,
         )
+
+
+@router.get(
+    "/model/settings",
+    description="Returns provider name, description, and required parameters for each provider",
+    tags=["model management"],
+    dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
+)
+async def model_settings():
+    """
+    Used by UI to generate 'model add' page
+    {
+        field_name=field_name,
+        field_type=allowed_args[field_name]["type"], # string/int
+        field_description=field_info.description or "", # human-friendly description
+        field_value=general_settings.get(field_name, None), # example value
+    }
+    """
+
+    returned_list = []
+    for provider in litellm.provider_list:
+        returned_list.append(
+            ProviderInfo(
+                name=provider,
+                fields=litellm.get_provider_fields(custom_llm_provider=provider),
+            )
+        )
+
+    return returned_list
 
 
 #### EXPERIMENTAL QUEUING ####
