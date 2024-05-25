@@ -12,6 +12,8 @@ from litellm.proxy._types import (
     LiteLLM_TeamTable,
     Member,
     CallInfo,
+    WebhookEvent,
+    AlertType,
 )
 from litellm.caching import DualCache, RedisCache
 from litellm.router import Deployment, ModelInfo, LiteLLM_Params
@@ -78,19 +80,7 @@ class ProxyLogging:
         self.cache_control_check = _PROXY_CacheControlCheck()
         self.alerting: Optional[List] = None
         self.alerting_threshold: float = 300  # default to 5 min. threshold
-        self.alert_types: List[
-            Literal[
-                "llm_exceptions",
-                "llm_too_slow",
-                "llm_requests_hanging",
-                "budget_alerts",
-                "db_exceptions",
-                "daily_reports",
-                "spend_reports",
-                "cooldown_deployment",
-                "new_model_added",
-            ]
-        ] = [
+        self.alert_types: List[AlertType] = [
             "llm_exceptions",
             "llm_too_slow",
             "llm_requests_hanging",
@@ -100,6 +90,7 @@ class ProxyLogging:
             "spend_reports",
             "cooldown_deployment",
             "new_model_added",
+            "outage_alerts",
         ]
         self.slack_alerting_instance = SlackAlerting(
             alerting_threshold=self.alerting_threshold,
@@ -113,21 +104,7 @@ class ProxyLogging:
         alerting: Optional[List],
         alerting_threshold: Optional[float],
         redis_cache: Optional[RedisCache],
-        alert_types: Optional[
-            List[
-                Literal[
-                    "llm_exceptions",
-                    "llm_too_slow",
-                    "llm_requests_hanging",
-                    "budget_alerts",
-                    "db_exceptions",
-                    "daily_reports",
-                    "spend_reports",
-                    "cooldown_deployment",
-                    "new_model_added",
-                ]
-            ]
-        ] = None,
+        alert_types: Optional[List[AlertType]] = None,
         alerting_args: Optional[dict] = None,
     ):
         self.alerting = alerting
@@ -1819,7 +1796,7 @@ async def _cache_user_row(
     return
 
 
-async def send_email(sender_name, sender_email, receiver_email, subject, html):
+async def send_email(receiver_email, subject, html):
     """
     smtp_host,
     smtp_port,
@@ -1829,13 +1806,27 @@ async def send_email(sender_name, sender_email, receiver_email, subject, html):
     sender_email,
     """
     ## SERVER SETUP ##
+    from litellm.proxy.proxy_server import premium_user
+    from litellm.proxy.proxy_server import CommonProxyErrors
+
+    # Check if user is premium - This is an Enterprise only Feature
+    if premium_user != True:
+        raise Exception(
+            f"Trying to use Email Alerting\n {CommonProxyErrors.not_premium_user.value}"
+        )
+    # Done Checking
+
     smtp_host = os.getenv("SMTP_HOST")
     smtp_port = os.getenv("SMTP_PORT", 587)  # default to port 587
     smtp_username = os.getenv("SMTP_USERNAME")
     smtp_password = os.getenv("SMTP_PASSWORD")
+    sender_email = os.getenv("SMTP_SENDER_EMAIL", None)
+    if sender_email is None:
+        raise Exception("Trying to use SMTP, but SMTP_SENDER_EMAIL is not set")
+
     ## EMAIL SETUP ##
     email_message = MIMEMultipart()
-    email_message["From"] = f"{sender_name} <{sender_email}>"
+    email_message["From"] = sender_email
     email_message["To"] = receiver_email
     email_message["Subject"] = subject
 
@@ -1843,7 +1834,6 @@ async def send_email(sender_name, sender_email, receiver_email, subject, html):
     email_message.attach(MIMEText(html, "html"))
 
     try:
-        print_verbose(f"SMTP Connection Init")
         # Establish a secure connection with the SMTP server
         with smtplib.SMTP(smtp_host, smtp_port) as server:
             if os.getenv("SMTP_TLS", "True") != "False":
@@ -2578,13 +2568,13 @@ def _is_valid_team_configs(team_id=None, team_config=None, request_data=None):
     return
 
 
-def _is_user_proxy_admin(user_id_information=None):
-    if (
-        user_id_information == None
-        or len(user_id_information) == 0
-        or user_id_information[0] == None
-    ):
+def _is_user_proxy_admin(user_id_information: Optional[list]):
+    if user_id_information is None:
         return False
+
+    if len(user_id_information) == 0 or user_id_information[0] is None:
+        return False
+
     _user = user_id_information[0]
     if (
         _user.get("user_role", None) is not None
@@ -2713,3 +2703,66 @@ html_form = """
 </body>
 </html>
 """
+
+
+missing_keys_html_form = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                background-color: #f4f4f9;
+                color: #333;
+                margin: 20px;
+                line-height: 1.6;
+            }
+            .container {
+                max-width: 600px;
+                margin: auto;
+                padding: 20px;
+                background: #fff;
+                border: 1px solid #ddd;
+                border-radius: 5px;
+                box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            }
+            h1 {
+                font-size: 24px;
+                margin-bottom: 20px;
+            }
+            pre {
+                background: #f8f8f8;
+                padding: 10px;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                overflow-x: auto;
+                font-size: 14px;
+            }
+            .env-var {
+                font-weight: normal;
+            }
+            .comment {
+                font-weight: normal;
+                color: #777;
+            }
+        </style>
+        <title>Environment Setup Instructions</title>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Environment Setup Instructions</h1>
+            <p>Please add the following configurations to your environment variables:</p>
+            <pre>
+<span class="env-var">LITELLM_MASTER_KEY="sk-1234"</span> <span class="comment"># make this unique. must start with `sk-`.</span>
+<span class="env-var">DATABASE_URL="postgres://..."</span> <span class="comment"># Need a postgres database? (Check out Supabase, Neon, etc)</span>
+
+<span class="comment">## OPTIONAL ##</span>
+<span class="env-var">PORT=4000</span> <span class="comment"># DO THIS FOR RENDER/RAILWAY</span>
+<span class="env-var">STORE_MODEL_IN_DB="True"</span> <span class="comment"># Allow storing models in db</span>
+            </pre>
+        </div>
+    </body>
+    </html>
+    """

@@ -420,6 +420,8 @@ def mock_completion(
                 api_key="mock-key",
             )
         if isinstance(mock_response, Exception):
+            if isinstance(mock_response, openai.APIError):
+                raise mock_response
             raise litellm.APIError(
                 status_code=500,  # type: ignore
                 message=str(mock_response),
@@ -463,7 +465,9 @@ def mock_completion(
 
         return model_response
 
-    except:
+    except Exception as e:
+        if isinstance(e, openai.APIError):
+            raise e
         traceback.print_exc()
         raise Exception("Mock completion response failed")
 
@@ -864,6 +868,7 @@ def completion(
             user=user,
             optional_params=optional_params,
             litellm_params=litellm_params,
+            custom_llm_provider=custom_llm_provider,
         )
         if mock_response:
             return mock_completion(
@@ -2535,6 +2540,7 @@ def batch_completion(
         list: A list of completion results.
     """
     args = locals()
+
     batch_messages = messages
     completions = []
     model = model
@@ -2588,7 +2594,15 @@ def batch_completion(
                     completions.append(future)
 
         # Retrieve the results from the futures
-        results = [future.result() for future in completions]
+        # results = [future.result() for future in completions]
+        # return exceptions if any
+        results = []
+        for future in completions:
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                results.append(exc)
+
     return results
 
 

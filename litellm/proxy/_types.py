@@ -7,6 +7,19 @@ import uuid, json, sys, os
 from litellm.types.router import UpdateRouterConfig
 from litellm.types.utils import ProviderField
 
+AlertType = Literal[
+    "llm_exceptions",
+    "llm_too_slow",
+    "llm_requests_hanging",
+    "budget_alerts",
+    "db_exceptions",
+    "daily_reports",
+    "spend_reports",
+    "cooldown_deployment",
+    "new_model_added",
+    "outage_alerts",
+]
+
 
 def hash_token(token: str):
     import hashlib
@@ -855,17 +868,7 @@ class ConfigGeneralSettings(LiteLLMBase):
         None,
         description="List of alerting integrations. Today, just slack - `alerting: ['slack']`",
     )
-    alert_types: Optional[
-        List[
-            Literal[
-                "llm_exceptions",
-                "llm_too_slow",
-                "llm_requests_hanging",
-                "budget_alerts",
-                "db_exceptions",
-            ]
-        ]
-    ] = Field(
+    alert_types: Optional[List[AlertType]] = Field(
         None,
         description="List of alerting types. By default it is all alerts",
     )
@@ -1093,7 +1096,7 @@ class CallInfo(LiteLLMBase):
     """Used for slack budget alerting"""
 
     spend: float
-    max_budget: float
+    max_budget: Optional[float] = None
     token: str = Field(description="Hashed value of that key")
     user_id: Optional[str] = None
     team_id: Optional[str] = None
@@ -1101,3 +1104,11 @@ class CallInfo(LiteLLMBase):
     key_alias: Optional[str] = None
     projected_exceeded_date: Optional[str] = None
     projected_spend: Optional[float] = None
+
+
+class WebhookEvent(CallInfo):
+    event: Literal[
+        "budget_crossed", "threshold_crossed", "projected_limit_exceeded", "key_created"
+    ]
+    event_group: Literal["user", "key", "team", "proxy"]
+    event_message: str  # human-readable description of event
