@@ -7,7 +7,6 @@ import secrets, subprocess
 import hashlib, uuid
 import warnings
 import importlib
-import warnings
 
 
 def showwarning(message, category, filename, lineno, file=None, line=None):
@@ -112,6 +111,11 @@ from litellm.router import ModelInfo as RouterModelInfo
 from litellm._logging import verbose_router_logger, verbose_proxy_logger
 from litellm.proxy.auth.handle_jwt import JWTHandler
 from litellm.proxy.auth.litellm_license import LicenseCheck
+from litellm.proxy.auth.model_checks import (
+    get_complete_model_list,
+    get_key_models,
+    get_team_models,
+)
 from litellm.proxy.hooks.prompt_injection_detection import (
     _OPTIONAL_PromptInjectionDetection,
 )
@@ -126,6 +130,7 @@ from litellm.proxy.auth.auth_checks import (
 )
 from litellm.llms.custom_httpx.httpx_handler import HTTPHandler
 from litellm.exceptions import RejectedRequestError
+from litellm.integrations.slack_alerting import SlackAlertingArgs, SlackAlerting
 
 try:
     from litellm._version import version
@@ -263,13 +268,7 @@ class ProxyException(Exception):
 
 
 class UserAPIKeyCacheTTLEnum(enum.Enum):
-    key_information_cache = 600
-    user_information_cache = 600
-    global_proxy_spend = 60
-
-
-class SpecialModelNames(enum.Enum):
-    all_team_models = "all-team-models"
+    in_memory_cache_ttl = 60  # 1 min ttl ## configure via `general_settings::user_api_key_cache_ttl: <your-value>`
 
 
 class CommonProxyErrors(enum.Enum):
@@ -343,7 +342,9 @@ master_key = None
 otel_logging = False
 prisma_client: Optional[PrismaClient] = None
 custom_db_client: Optional[DBClient] = None
-user_api_key_cache = DualCache()
+user_api_key_cache = DualCache(
+    default_in_memory_ttl=UserAPIKeyCacheTTLEnum.in_memory_cache_ttl.value
+)
 redis_usage_cache: Optional[RedisCache] = (
     None  # redis cache used for tracking spend, tpm/rpm limits
 )
@@ -594,7 +595,6 @@ async def user_api_key_auth(
                         await user_api_key_cache.async_set_cache(
                             key="{}:spend".format(litellm_proxy_admin_name),
                             value=global_proxy_spend,
-                            ttl=UserAPIKeyCacheTTLEnum.global_proxy_spend.value,
                         )
                     if global_proxy_spend is not None:
                         user_info = CallInfo(
@@ -924,7 +924,6 @@ async def user_api_key_auth(
                                 await user_api_key_cache.async_set_cache(
                                     key=_id["user_id"],
                                     value=_id,
-                                    ttl=UserAPIKeyCacheTTLEnum.user_information_cache.value,
                                 )
 
                 verbose_proxy_logger.debug(
@@ -1026,7 +1025,6 @@ async def user_api_key_auth(
                         await user_api_key_cache.async_set_cache(
                             key=_cache_key,
                             value=team_member_info,
-                            ttl=UserAPIKeyCacheTTLEnum.user_information_cache.value,
                         )
 
                     if (
@@ -1196,7 +1194,6 @@ async def user_api_key_auth(
                     await user_api_key_cache.async_set_cache(
                         key="{}:spend".format(litellm_proxy_admin_name),
                         value=global_proxy_spend,
-                        ttl=UserAPIKeyCacheTTLEnum.global_proxy_spend.value,
                     )
 
                 if global_proxy_spend is not None:
@@ -1229,7 +1226,6 @@ async def user_api_key_auth(
             await user_api_key_cache.async_set_cache(
                 key=api_key,
                 value=valid_token,
-                ttl=UserAPIKeyCacheTTLEnum.key_information_cache.value,
             )
             valid_token_dict = valid_token.model_dump(exclude_none=True)
             valid_token_dict.pop("token", None)
@@ -2658,6 +2654,15 @@ class ProxyConfig:
 
             if master_key is not None and isinstance(master_key, str):
                 litellm_master_key_hash = hash_token(master_key)
+            ### USER API KEY CACHE IN-MEMORY TTL ###
+            user_api_key_cache_ttl = general_settings.get(
+                "user_api_key_cache_ttl", None
+            )
+            if user_api_key_cache_ttl is not None:
+                user_api_key_cache.update_cache_ttl(
+                    default_in_memory_ttl=float(user_api_key_cache_ttl),
+                    default_redis_ttl=None,  # user_api_key_cache is an in-memory cache
+                )
             ### STORE MODEL IN DB ### feature flag for `/model/new`
             store_model_in_db = general_settings.get("store_model_in_db", False)
             if store_model_in_db is None:
@@ -3045,6 +3050,13 @@ class ProxyConfig:
             general_settings["global_max_parallel_requests"] = _general_settings[
                 "global_max_parallel_requests"
             ]
+
+        ## ALERTING ARGS ##
+        if "alerting_args" in _general_settings:
+            general_settings["alerting_args"] = _general_settings["alerting_args"]
+            proxy_logging_obj.slack_alerting_instance.update_values(
+                alerting_args=general_settings["alerting_args"],
+            )
 
     async def add_deployment(
         self,
@@ -3774,21 +3786,24 @@ def model_list(
 ):
     global llm_model_list, general_settings
     all_models = []
-    if len(user_api_key_dict.models) > 0:
-        all_models = user_api_key_dict.models
-        if SpecialModelNames.all_team_models.value in all_models:
-            all_models = user_api_key_dict.team_models
-    if len(all_models) == 0:  # has all proxy models
-        ## if no specific model access
-        if general_settings.get("infer_model_from_keys", False):
-            all_models = litellm.utils.get_valid_models()
-        if llm_model_list:
-            all_models = list(
-                set(all_models + [m["model_name"] for m in llm_model_list])
-            )
-        if user_model is not None:
-            all_models += [user_model]
-    verbose_proxy_logger.debug("all_models: %s", all_models)
+    ## CHECK IF MODEL RESTRICTIONS ARE SET AT KEY/TEAM LEVEL ##
+    if llm_model_list is None:
+        proxy_model_list = []
+    else:
+        proxy_model_list = [m["model_name"] for m in llm_model_list]
+    key_models = get_key_models(
+        user_api_key_dict=user_api_key_dict, proxy_model_list=proxy_model_list
+    )
+    team_models = get_team_models(
+        user_api_key_dict=user_api_key_dict, proxy_model_list=proxy_model_list
+    )
+    all_models = get_complete_model_list(
+        key_models=key_models,
+        team_models=team_models,
+        proxy_model_list=proxy_model_list,
+        user_model=user_model,
+        infer_model_from_keys=general_settings.get("infer_model_from_keys", False),
+    )
     return dict(
         data=[
             {
@@ -5884,6 +5899,362 @@ async def view_spend_tags(
 
 
 @router.get(
+    "/global/activity",
+    tags=["Budget & Spend Tracking"],
+    dependencies=[Depends(user_api_key_auth)],
+    responses={
+        200: {"model": List[LiteLLM_SpendLogs]},
+    },
+)
+async def get_global_activity(
+    start_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="Time from which to start viewing spend",
+    ),
+    end_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="Time till which to view spend",
+    ),
+):
+    """
+    Get number of API Requests, total tokens through proxy
+
+    {
+        "daily_data": [
+                const chartdata = [
+                {
+                date: 'Jan 22',
+                api_requests: 10,
+                total_tokens: 2000
+                },
+                {
+                date: 'Jan 23',
+                api_requests: 10,
+                total_tokens: 12
+                },
+        ],
+        "sum_api_requests": 20,
+        "sum_total_tokens": 2012
+    }
+    """
+    from collections import defaultdict
+
+    if start_date is None or end_date is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Please provide start_date and end_date"},
+        )
+
+    start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
+    end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+
+    global prisma_client, llm_router
+    try:
+        if prisma_client is None:
+            raise Exception(
+                f"Database not connected. Connect a database to your proxy - https://docs.litellm.ai/docs/simple_proxy#managing-auth---virtual-keys"
+            )
+
+        sql_query = """
+        SELECT
+            date_trunc('day', "startTime") AS date,
+            COUNT(*) AS api_requests,
+            SUM(total_tokens) AS total_tokens
+        FROM "LiteLLM_SpendLogs"
+        WHERE "startTime" BETWEEN $1::date AND $2::date + interval '1 day'
+        GROUP BY date_trunc('day', "startTime")
+        """
+        db_response = await prisma_client.db.query_raw(
+            sql_query, start_date_obj, end_date_obj
+        )
+
+        if db_response is None:
+            return []
+
+        sum_api_requests = 0
+        sum_total_tokens = 0
+        daily_data = []
+        for row in db_response:
+            # cast date to datetime
+            _date_obj = datetime.fromisoformat(row["date"])
+            row["date"] = _date_obj.strftime("%b %d")
+
+            daily_data.append(row)
+            sum_api_requests += row.get("api_requests", 0)
+            sum_total_tokens += row.get("total_tokens", 0)
+
+        # sort daily_data by date
+        daily_data = sorted(daily_data, key=lambda x: x["date"])
+
+        data_to_return = {
+            "daily_data": daily_data,
+            "sum_api_requests": sum_api_requests,
+            "sum_total_tokens": sum_total_tokens,
+        }
+
+        return data_to_return
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": str(e)},
+        )
+
+
+@router.get(
+    "/global/activity/model",
+    tags=["Budget & Spend Tracking"],
+    dependencies=[Depends(user_api_key_auth)],
+    responses={
+        200: {"model": List[LiteLLM_SpendLogs]},
+    },
+)
+async def get_global_activity_model(
+    start_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="Time from which to start viewing spend",
+    ),
+    end_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="Time till which to view spend",
+    ),
+):
+    """
+    Get number of API Requests, total tokens through proxy - Grouped by MODEL
+
+    [
+        {
+            "model": "gpt-4",
+            "daily_data": [
+                    const chartdata = [
+                    {
+                    date: 'Jan 22',
+                    api_requests: 10,
+                    total_tokens: 2000
+                    },
+                    {
+                    date: 'Jan 23',
+                    api_requests: 10,
+                    total_tokens: 12
+                    },
+            ],
+            "sum_api_requests": 20,
+            "sum_total_tokens": 2012
+
+        },
+        {
+            "model": "azure/gpt-4-turbo",
+            "daily_data": [
+                    const chartdata = [
+                    {
+                    date: 'Jan 22',
+                    api_requests: 10,
+                    total_tokens: 2000
+                    },
+                    {
+                    date: 'Jan 23',
+                    api_requests: 10,
+                    total_tokens: 12
+                    },
+            ],
+            "sum_api_requests": 20,
+            "sum_total_tokens": 2012
+
+        },
+    ]
+    """
+    from collections import defaultdict
+
+    if start_date is None or end_date is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Please provide start_date and end_date"},
+        )
+
+    start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
+    end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+
+    global prisma_client, llm_router, premium_user
+    try:
+        if prisma_client is None:
+            raise Exception(
+                f"Database not connected. Connect a database to your proxy - https://docs.litellm.ai/docs/simple_proxy#managing-auth---virtual-keys"
+            )
+
+        sql_query = """
+        SELECT
+            model,
+            date_trunc('day', "startTime") AS date,
+            COUNT(*) AS api_requests,
+            SUM(total_tokens) AS total_tokens
+        FROM "LiteLLM_SpendLogs"
+        WHERE "startTime" BETWEEN $1::date AND $2::date + interval '1 day'
+        GROUP BY model, date_trunc('day', "startTime")
+
+        """
+        db_response = await prisma_client.db.query_raw(
+            sql_query, start_date_obj, end_date_obj
+        )
+        if db_response is None:
+            return []
+
+        model_ui_data: dict = (
+            {}
+        )  # {"gpt-4": {"daily_data": [], "sum_api_requests": 0, "sum_total_tokens": 0}}
+
+        for row in db_response:
+            _model = row["model"]
+            if _model not in model_ui_data:
+                model_ui_data[_model] = {
+                    "daily_data": [],
+                    "sum_api_requests": 0,
+                    "sum_total_tokens": 0,
+                }
+            _date_obj = datetime.fromisoformat(row["date"])
+            row["date"] = _date_obj.strftime("%b %d")
+
+            model_ui_data[_model]["daily_data"].append(row)
+            model_ui_data[_model]["sum_api_requests"] += row.get("api_requests", 0)
+            model_ui_data[_model]["sum_total_tokens"] += row.get("total_tokens", 0)
+
+        # sort mode ui data by sum_api_requests -> get top 10 models
+        model_ui_data = dict(
+            sorted(
+                model_ui_data.items(),
+                key=lambda x: x[1]["sum_api_requests"],
+                reverse=True,
+            )[:10]
+        )
+
+        response = []
+        for model, data in model_ui_data.items():
+            _sort_daily_data = sorted(data["daily_data"], key=lambda x: x["date"])
+
+            response.append(
+                {
+                    "model": model,
+                    "daily_data": _sort_daily_data,
+                    "sum_api_requests": data["sum_api_requests"],
+                    "sum_total_tokens": data["sum_total_tokens"],
+                }
+            )
+
+        return response
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": str(e)},
+        )
+
+
+@router.get(
+    "/global/spend/provider",
+    tags=["Budget & Spend Tracking"],
+    dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
+    responses={
+        200: {"model": List[LiteLLM_SpendLogs]},
+    },
+)
+async def get_global_spend_provider(
+    start_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="Time from which to start viewing spend",
+    ),
+    end_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="Time till which to view spend",
+    ),
+):
+    """
+    Get breakdown of spend per provider
+    [
+        {
+            "provider": "Azure OpenAI",
+            "spend": 20
+        },
+        {
+            "provider": "OpenAI",
+            "spend": 10
+        },
+        {
+            "provider": "VertexAI",
+            "spend": 30
+        }
+    ]
+    """
+    from collections import defaultdict
+
+    if start_date is None or end_date is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Please provide start_date and end_date"},
+        )
+
+    start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
+    end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+
+    global prisma_client, llm_router
+    try:
+        if prisma_client is None:
+            raise Exception(
+                f"Database not connected. Connect a database to your proxy - https://docs.litellm.ai/docs/simple_proxy#managing-auth---virtual-keys"
+            )
+
+        sql_query = """
+
+        SELECT
+        model_id,
+        SUM(spend) AS spend
+        FROM "LiteLLM_SpendLogs"
+        WHERE "startTime" BETWEEN $1::date AND $2::date AND length(model_id) > 0
+        GROUP BY model_id
+        """
+
+        db_response = await prisma_client.db.query_raw(
+            sql_query, start_date_obj, end_date_obj
+        )
+        if db_response is None:
+            return []
+
+        ###################################
+        # Convert model_id -> to Provider #
+        ###################################
+
+        # we use the in memory router for this
+        ui_response = []
+        provider_spend_mapping: defaultdict = defaultdict(int)
+        for row in db_response:
+            _model_id = row["model_id"]
+            _provider = "Unknown"
+            if llm_router is not None:
+                _deployment = llm_router.get_deployment(model_id=_model_id)
+                if _deployment is not None:
+                    try:
+                        _, _provider, _, _ = litellm.get_llm_provider(
+                            model=_deployment.litellm_params.model,
+                            custom_llm_provider=_deployment.litellm_params.custom_llm_provider,
+                            api_base=_deployment.litellm_params.api_base,
+                            litellm_params=_deployment.litellm_params,
+                        )
+                        provider_spend_mapping[_provider] += row["spend"]
+                    except:
+                        pass
+
+        for provider, spend in provider_spend_mapping.items():
+            ui_response.append({"provider": provider, "spend": spend})
+
+        return ui_response
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": str(e)},
+        )
+
+
+@router.get(
     "/global/spend/report",
     tags=["Budget & Spend Tracking"],
     dependencies=[Depends(user_api_key_auth)],
@@ -7677,11 +8048,14 @@ async def new_team(
     ## ADD TO TEAM TABLE
     complete_team_data = LiteLLM_TeamTable(
         **data.json(),
-        max_parallel_requests=user_api_key_dict.max_parallel_requests,
-        budget_duration=user_api_key_dict.budget_duration,
-        budget_reset_at=user_api_key_dict.budget_reset_at,
         model_id=_model_id,
     )
+
+    # If budget_duration is set, set `budget_reset_at`
+    if complete_team_data.budget_duration is not None:
+        duration_s = _duration_in_seconds(duration=complete_team_data.budget_duration)
+        reset_at = datetime.now(timezone.utc) + timedelta(seconds=duration_s)
+        complete_team_data.budget_reset_at = reset_at
 
     team_row = await prisma_client.insert_data(
         data=complete_team_data.json(exclude_none=True), table_name="team"
@@ -7761,6 +8135,15 @@ async def update_team(
         )
 
     updated_kv = data.json(exclude_none=True)
+
+    # Check budget_duration and budget_reset_at
+    if data.budget_duration is not None:
+        duration_s = _duration_in_seconds(duration=data.budget_duration)
+        reset_at = datetime.now(timezone.utc) + timedelta(seconds=duration_s)
+
+        # set the budget_reset_at in DB
+        updated_kv["budget_reset_at"] = reset_at
+
     team_row = await prisma_client.update_data(
         update_key_values=updated_kv,
         data=updated_kv,
@@ -8535,6 +8918,7 @@ async def budget_settings(
                 field_description=field_info.description or "",
                 field_value=db_budget_row_dict.get(field_name, None),
                 stored_in_db=_stored_in_db,
+                field_default_value=field_info.default,
             )
             return_val.append(_response_obj)
 
@@ -9281,12 +9665,31 @@ async def model_info_v1(
             status_code=500, detail={"error": "LLM Model List not loaded in"}
         )
 
-    if len(user_api_key_dict.models) > 0:
-        model_names = user_api_key_dict.models
+    all_models: List[dict] = []
+    ## CHECK IF MODEL RESTRICTIONS ARE SET AT KEY/TEAM LEVEL ##
+    if llm_model_list is None:
+        proxy_model_list = []
+    else:
+        proxy_model_list = [m["model_name"] for m in llm_model_list]
+    key_models = get_key_models(
+        user_api_key_dict=user_api_key_dict, proxy_model_list=proxy_model_list
+    )
+    team_models = get_team_models(
+        user_api_key_dict=user_api_key_dict, proxy_model_list=proxy_model_list
+    )
+    all_models_str = get_complete_model_list(
+        key_models=key_models,
+        team_models=team_models,
+        proxy_model_list=proxy_model_list,
+        user_model=user_model,
+        infer_model_from_keys=general_settings.get("infer_model_from_keys", False),
+    )
+
+    if len(all_models_str) > 0:
+        model_names = all_models_str
         _relevant_models = [m for m in llm_model_list if m["model_name"] in model_names]
         all_models = copy.deepcopy(_relevant_models)
-    else:
-        all_models = copy.deepcopy(llm_model_list)
+
     for model in all_models:
         # provided model_info in config.yaml
         model_info = model.get("model_info", {})
@@ -9430,6 +9833,152 @@ async def model_settings():
         )
 
     return returned_list
+
+
+#### ALERTING MANAGEMENT ENDPOINTS ####
+
+
+@router.get(
+    "/alerting/settings",
+    description="Return the configurable alerting param, description, and current value",
+    tags=["alerting"],
+    dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
+)
+async def alerting_settings(
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    global proxy_logging_obj, prisma_client
+    """
+    Used by UI to generate 'alerting settings' page
+    {
+        field_name=field_name,
+        field_type=allowed_args[field_name]["type"], # string/int
+        field_description=field_info.description or "", # human-friendly description
+        field_value=general_settings.get(field_name, None), # example value
+    }
+    """
+    if prisma_client is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": CommonProxyErrors.db_not_connected_error.value},
+        )
+
+    if user_api_key_dict.user_role != "proxy_admin":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "{}, your role={}".format(
+                    CommonProxyErrors.not_allowed_access.value,
+                    user_api_key_dict.user_role,
+                )
+            },
+        )
+
+    ## get general settings from db
+    db_general_settings = await prisma_client.db.litellm_config.find_first(
+        where={"param_name": "general_settings"}
+    )
+
+    if db_general_settings is not None and db_general_settings.param_value is not None:
+        db_general_settings_dict = dict(db_general_settings.param_value)
+        alerting_args_dict: dict = db_general_settings_dict.get("alerting_args", {})  # type: ignore
+    else:
+        alerting_args_dict = {}
+
+    allowed_args = {
+        "daily_report_frequency": {"type": "Integer"},
+        "report_check_interval": {"type": "Integer"},
+        "budget_alert_ttl": {"type": "Integer"},
+        "outage_alert_ttl": {"type": "Integer"},
+        "region_outage_alert_ttl": {"type": "Integer"},
+        "minor_outage_alert_threshold": {"type": "Integer"},
+        "major_outage_alert_threshold": {"type": "Integer"},
+        "max_outage_alert_list_size": {"type": "Integer"},
+    }
+
+    _slack_alerting: SlackAlerting = proxy_logging_obj.slack_alerting_instance
+    _slack_alerting_args_dict = _slack_alerting.alerting_args.model_dump()
+
+    return_val = []
+
+    for field_name, field_info in SlackAlertingArgs.model_fields.items():
+        if field_name in allowed_args:
+
+            _stored_in_db: Optional[bool] = None
+            if field_name in alerting_args_dict:
+                _stored_in_db = True
+            else:
+                _stored_in_db = False
+
+            _response_obj = ConfigList(
+                field_name=field_name,
+                field_type=allowed_args[field_name]["type"],
+                field_description=field_info.description or "",
+                field_value=_slack_alerting_args_dict.get(field_name, None),
+                stored_in_db=_stored_in_db,
+                field_default_value=field_info.default,
+                premium_field=(
+                    True if field_name == "region_outage_alert_ttl" else False
+                ),
+            )
+            return_val.append(_response_obj)
+    return return_val
+
+
+# @router.post(
+#     "/alerting/update",
+#     description="Update the slack alerting settings. Persist value in db.",
+#     tags=["alerting"],
+#     dependencies=[Depends(user_api_key_auth)],
+#     include_in_schema=False,
+# )
+# async def alerting_update(
+#     data: SlackAlertingArgs,
+#     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+# ):
+#     """Allows updating slack alerting values. Used by UI."""
+#     global prisma_client
+#     if prisma_client is None:
+#         raise HTTPException(
+#             status_code=400,
+#             detail={"error": CommonProxyErrors.db_not_connected_error.value},
+#         )
+
+#     if user_api_key_dict.user_role != "proxy_admin":
+#         raise HTTPException(
+#             status_code=400,
+#             detail={"error": CommonProxyErrors.not_allowed_access.value},
+#         )
+
+#     ## get general settings from db
+#     db_general_settings = await prisma_client.db.litellm_config.find_first(
+#         where={"param_name": "general_settings"}
+#     )
+#     ### update value
+
+#     alerting_args_dict = {}
+#     if db_general_settings is None or db_general_settings.param_value is None:
+#         general_settings = {}
+#         alerting_args_dict = {}
+#     else:
+#         general_settings = dict(db_general_settings.param_value)
+#         _alerting_args_dict = general_settings.get("alerting_args", None)
+#         if _alerting_args_dict is not None and isinstance(_alerting_args_dict, dict):
+#             alerting_args_dict = _alerting_args_dict
+
+
+#     alerting_args_dict = data.model
+
+#     response = await prisma_client.db.litellm_config.upsert(
+#         where={"param_name": "general_settings"},
+#         data={
+#             "create": {"param_name": "general_settings", "param_value": json.dumps(general_settings)},  # type: ignore
+#             "update": {"param_value": json.dumps(general_settings)},  # type: ignore
+#         },
+#     )
+
+#     return response
 
 
 #### EXPERIMENTAL QUEUING ####
@@ -10575,6 +11124,7 @@ async def get_config_list(
                 field_description=field_info.description or "",
                 field_value=general_settings.get(field_name, None),
                 stored_in_db=_stored_in_db,
+                field_default_value=field_info.default,
             )
             return_val.append(_response_obj)
 

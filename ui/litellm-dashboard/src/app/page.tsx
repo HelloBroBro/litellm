@@ -182,6 +182,7 @@ const CreateKeyPage = () => {
               userID={userID}
               userRole={userRole}
               accessToken={accessToken}
+              premiumUser={premiumUser}
             />
           ) : page == "budgets" ? (
             <BudgetPanel accessToken={accessToken} />
@@ -199,6 +200,7 @@ const CreateKeyPage = () => {
               token={token}
               accessToken={accessToken}
               keys={keys}
+              premiumUser={premiumUser}
             />
           )}
         </div>

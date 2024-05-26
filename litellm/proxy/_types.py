@@ -18,6 +18,7 @@ AlertType = Literal[
     "cooldown_deployment",
     "new_model_added",
     "outage_alerts",
+    "region_outage_alerts",
 ]
 
 
@@ -561,7 +562,11 @@ class TeamBase(LiteLLMBase):
     metadata: Optional[dict] = None
     tpm_limit: Optional[int] = None
     rpm_limit: Optional[int] = None
+
+    # Budget fields
     max_budget: Optional[float] = None
+    budget_duration: Optional[str] = None
+
     models: list = []
     blocked: bool = False
 
@@ -598,6 +603,21 @@ class TeamMemberDeleteRequest(LiteLLMBase):
 
 
 class UpdateTeamRequest(LiteLLMBase):
+    """
+    UpdateTeamRequest, used by /team/update when you need to update a team
+
+    team_id: str
+    team_alias: Optional[str] = None
+    organization_id: Optional[str] = None
+    metadata: Optional[dict] = None
+    tpm_limit: Optional[int] = None
+    rpm_limit: Optional[int] = None
+    max_budget: Optional[float] = None
+    models: Optional[list] = None
+    blocked: Optional[bool] = None
+    budget_duration: Optional[str] = None
+    """
+
     team_id: str  # required
     team_alias: Optional[str] = None
     organization_id: Optional[str] = None
@@ -607,6 +627,23 @@ class UpdateTeamRequest(LiteLLMBase):
     max_budget: Optional[float] = None
     models: Optional[list] = None
     blocked: Optional[bool] = None
+    budget_duration: Optional[str] = None
+
+
+class ResetTeamBudgetRequest(LiteLLMBase):
+    """
+    internal type used to reset the budget on a team
+    used by reset_budget()
+
+    team_id: str
+    spend: float
+    budget_reset_at: datetime
+    """
+
+    team_id: str
+    spend: float
+    budget_reset_at: datetime
+    updated_at: datetime
 
 
 class DeleteTeamRequest(LiteLLMBase):
@@ -799,6 +836,8 @@ class ConfigList(LiteLLMBase):
     field_description: str
     field_value: Any
     stored_in_db: Optional[bool]
+    field_default_value: Any
+    premium_field: bool = False
 
 
 class ConfigGeneralSettings(LiteLLMBase):
@@ -876,7 +915,9 @@ class ConfigGeneralSettings(LiteLLMBase):
         None,
         description="Mapping of alert type to webhook url. e.g. `alert_to_webhook_url: {'budget_alerts': 'https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX'}`",
     )
-
+    alerting_args: Optional[Dict] = Field(
+        None, description="Controllable params for slack alerting - e.g. ttl in cache."
+    )
     alerting_threshold: Optional[int] = Field(
         None,
         description="sends alerts if requests hang for 5min+",
@@ -1112,3 +1153,8 @@ class WebhookEvent(CallInfo):
     ]
     event_group: Literal["user", "key", "team", "proxy"]
     event_message: str  # human-readable description of event
+
+
+class SpecialModelNames(enum.Enum):
+    all_team_models = "all-team-models"
+    all_proxy_models = "all-proxy-models"
