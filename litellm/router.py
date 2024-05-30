@@ -356,7 +356,8 @@ class Router:
                 raise ValueError(f"Item '{fallback_dict}' is not a dictionary.")
             if len(fallback_dict) != 1:
                 raise ValueError(
-                    f"Dictionary '{fallback_dict}' must have exactly one key, but has {len(fallback_dict)} keys.")
+                    f"Dictionary '{fallback_dict}' must have exactly one key, but has {len(fallback_dict)} keys."
+                )
 
     def routing_strategy_init(self, routing_strategy: str, routing_strategy_args: dict):
         if routing_strategy == "least-busy":
@@ -662,12 +663,40 @@ class Router:
             raise e
 
     async def abatch_completion(
-        self, models: List[str], messages: List[Dict[str, str]], **kwargs
+        self,
+        models: List[str],
+        messages: Union[List[Dict[str, str]], List[List[Dict[str, str]]]],
+        **kwargs,
     ):
         """
-        Async Batch Completion - Batch Process 1 request to multiple model_group on litellm.Router
-        Use this for sending the same request to N models
+        Async Batch Completion. Used for 2 scenarios:
+        1. Batch Process 1 request to N models on litellm.Router. Pass messages as List[Dict[str, str]] to use this
+        2. Batch Process N requests to M models on litellm.Router. Pass messages as List[List[Dict[str, str]]] to use this
+
+        Example Request for 1 request to N models:
+        ```
+            response = await router.abatch_completion(
+                models=["gpt-3.5-turbo", "groq-llama"],
+                messages=[
+                    {"role": "user", "content": "is litellm becoming a better product ?"}
+                ],
+                max_tokens=15,
+            )
+        ```
+
+
+        Example Request for N requests to M models:
+        ```
+            response = await router.abatch_completion(
+                models=["gpt-3.5-turbo", "groq-llama"],
+                messages=[
+                    [{"role": "user", "content": "is litellm becoming a better product ?"}],
+                    [{"role": "user", "content": "who is this"}],
+                ],
+            )
+        ```
         """
+        ############## Helpers for async completion ##################
 
         async def _async_completion_no_exceptions(
             model: str, messages: List[Dict[str, str]], **kwargs
@@ -680,17 +709,50 @@ class Router:
             except Exception as e:
                 return e
 
-        _tasks = []
-        for model in models:
-            # add each task but if the task fails
-            _tasks.append(
-                _async_completion_no_exceptions(
-                    model=model, messages=messages, **kwargs
+        async def _async_completion_no_exceptions_return_idx(
+            model: str,
+            messages: List[Dict[str, str]],
+            idx: int,  # index of message this response corresponds to
+            **kwargs,
+        ):
+            """
+            Wrapper around self.async_completion that catches exceptions and returns them as a result
+            """
+            try:
+                return (
+                    await self.acompletion(model=model, messages=messages, **kwargs),
+                    idx,
                 )
-            )
+            except Exception as e:
+                return e, idx
 
-        response = await asyncio.gather(*_tasks)
-        return response
+        ############## Helpers for async completion ##################
+
+        if isinstance(messages, list) and all(isinstance(m, dict) for m in messages):
+            _tasks = []
+            for model in models:
+                # add each task but if the task fails
+                _tasks.append(_async_completion_no_exceptions(model=model, messages=messages, **kwargs))  # type: ignore
+            response = await asyncio.gather(*_tasks)
+            return response
+        elif isinstance(messages, list) and all(isinstance(m, list) for m in messages):
+            _tasks = []
+            for idx, message in enumerate(messages):
+                for model in models:
+                    # Request Number X, Model Number Y
+                    _tasks.append(
+                        _async_completion_no_exceptions_return_idx(
+                            model=model, idx=idx, messages=message, **kwargs  # type: ignore
+                        )
+                    )
+            responses = await asyncio.gather(*_tasks)
+            final_responses: List[List[Any]] = [[] for _ in range(len(messages))]
+            for response in responses:
+                if isinstance(response, tuple):
+                    final_responses[response[1]].append(response[0])
+                else:
+                    final_responses[0].append(response)
+            return final_responses
 
     async def abatch_completion_one_model_multiple_requests(
         self, model: str, messages: List[List[Dict[str, str]]], **kwargs
@@ -736,6 +798,101 @@ class Router:
 
         response = await asyncio.gather(*_tasks)
         return response
+
+    # fmt: off
+
+    @overload
+    async def abatch_completion_fastest_response(
+        self, model: str, messages: List[Dict[str, str]], stream: Literal[True], **kwargs
+    ) -> CustomStreamWrapper:
+        ...
+
+
+
+    @overload
+    async def abatch_completion_fastest_response(
+        self, model: str, messages: List[Dict[str, str]], stream: Literal[False] = False, **kwargs
+    ) -> ModelResponse:
+        ...
+
+    # fmt: on
+
+    async def abatch_completion_fastest_response(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        stream: bool = False,
+        **kwargs,
+    ):
+        """
+        model - List of comma-separated model names. E.g. model="gpt-4, gpt-3.5-turbo"
+
+        Returns fastest response from list of model names. OpenAI-compatible endpoint.
+        """
+        models = [m.strip() for m in model.split(",")]
+
+        async def _async_completion_no_exceptions(
+            model: str, messages: List[Dict[str, str]], stream: bool, **kwargs: Any
+        ) -> Union[ModelResponse, CustomStreamWrapper, Exception]:
+            """
+            Wrapper around self.acompletion that catches exceptions and returns them as a result
+            """
+            try:
+                return await self.acompletion(model=model, messages=messages, stream=stream, **kwargs)  # type: ignore
+            except asyncio.CancelledError:
+                verbose_router_logger.debug(
+                    "Received 'task.cancel'. Cancelling call w/ model={}.".format(model)
+                )
+                raise
+            except Exception as e:
+                return e
+
+        pending_tasks = []  # type: ignore
+
+        async def check_response(task: asyncio.Task):
+            nonlocal pending_tasks
+            try:
+                result = await task
+                if isinstance(result, (ModelResponse, CustomStreamWrapper)):
+                    verbose_router_logger.debug(
+                        "Received successful response. Cancelling other LLM API calls."
+                    )
+                    # If a desired response is received, cancel all other pending tasks
+                    for t in pending_tasks:
+                        t.cancel()
+                    return result
+            except Exception:
+                # Ignore exceptions, let the loop handle them
+                pass
+            finally:
+                # Remove the task from pending tasks if it finishes
+                try:
+                    pending_tasks.remove(task)
+                except KeyError:
+                    pass
+
+        for model in models:
+            task = asyncio.create_task(
+                _async_completion_no_exceptions(
+                    model=model, messages=messages, stream=stream, **kwargs
+                )
+            )
+            pending_tasks.append(task)
+
+        # Await the first task to complete successfully
+        while pending_tasks:
+            done, pending_tasks = await asyncio.wait(  # type: ignore
+                pending_tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+            for completed_task in done:
+                result = await check_response(completed_task)
+                if result is not None:
+                    # Return the first successful result
+                    result._hidden_params["fastest_response_batch_completion"] = True
+                    return result
+
+        # If we exit the loop without returning, all tasks failed
+        raise Exception("All tasks failed")
 
     def image_generation(self, prompt: str, model: str, **kwargs):
         try:
@@ -2453,8 +2610,17 @@ class Router:
 
             if "azure" in model_name:
                 if api_base is None or not isinstance(api_base, str):
+                    filtered_litellm_params = {
+                        k: v
+                        for k, v in model["litellm_params"].items()
+                        if k != "api_key"
+                    }
+                    _filtered_model = {
+                        "model_name": model["model_name"],
+                        "litellm_params": filtered_litellm_params,
+                    }
                     raise ValueError(
-                        f"api_base is required for Azure OpenAI. Set it on your config. Model - {model}"
+                        f"api_base is required for Azure OpenAI. Set it on your config. Model - {_filtered_model}"
                     )
                 azure_ad_token = litellm_params.get("azure_ad_token")
                 if azure_ad_token is not None:
@@ -3546,7 +3712,6 @@ class Router:
         ## get healthy deployments
         ### get all deployments
         healthy_deployments = [m for m in self.model_list if m["model_name"] == model]
-
         if len(healthy_deployments) == 0:
             # check if the user sent in a deployment name instead
             healthy_deployments = [

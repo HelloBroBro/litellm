@@ -349,7 +349,6 @@ class OpenAIConfig:
             "top_p",
             "tools",
             "tool_choice",
-            "user",
             "function_call",
             "functions",
             "max_retries",
@@ -362,6 +361,12 @@ class OpenAIConfig:
         ):  # gpt-4 does not support 'response_format'
             model_specific_params.append("response_format")
 
+        if (
+            model in litellm.open_ai_chat_completion_models
+        ) or model in litellm.open_ai_text_completion_models:
+            model_specific_params.append(
+                "user"
+            )  # user is not a param supported by all openai-compatible endpoints - e.g. azure ai
         return base_params + model_specific_params
 
     def map_openai_params(
@@ -1085,8 +1090,8 @@ class OpenAIChatCompletion(BaseLLM):
         model_response: TranscriptionResponse,
         timeout: float,
         max_retries: int,
-        api_key: Optional[str] = None,
-        api_base: Optional[str] = None,
+        api_key: Optional[str],
+        api_base: Optional[str],
         client=None,
         logging_obj=None,
         atranscription: bool = False,
@@ -1142,7 +1147,6 @@ class OpenAIChatCompletion(BaseLLM):
         max_retries=None,
         logging_obj=None,
     ):
-        response = None
         try:
             if client is None:
                 openai_aclient = AsyncOpenAI(
@@ -1583,6 +1587,54 @@ class OpenAIFilesAPI(BaseLLM):
                 create_file_data=create_file_data, openai_client=openai_client
             )
         response = openai_client.files.create(**create_file_data)
+        return response
+
+    async def afile_content(
+        self,
+        file_content_request: FileContentRequest,
+        openai_client: AsyncOpenAI,
+    ) -> HttpxBinaryResponseContent:
+        response = await openai_client.files.content(**file_content_request)
+        return response
+
+    def file_content(
+        self,
+        _is_async: bool,
+        file_content_request: FileContentRequest,
+        api_base: str,
+        api_key: Optional[str],
+        timeout: Union[float, httpx.Timeout],
+        max_retries: Optional[int],
+        organization: Optional[str],
+        client: Optional[Union[OpenAI, AsyncOpenAI]] = None,
+    ) -> Union[
+        HttpxBinaryResponseContent, Coroutine[Any, Any, HttpxBinaryResponseContent]
+    ]:
+        openai_client: Optional[Union[OpenAI, AsyncOpenAI]] = self.get_openai_client(
+            api_key=api_key,
+            api_base=api_base,
+            timeout=timeout,
+            max_retries=max_retries,
+            organization=organization,
+            client=client,
+            _is_async=_is_async,
+        )
+        if openai_client is None:
+            raise ValueError(
+                "OpenAI client is not initialized. Make sure api_key is passed or OPENAI_API_KEY is set in the environment."
+            )
+
+        if _is_async is True:
+            if not isinstance(openai_client, AsyncOpenAI):
+                raise ValueError(
+                    "OpenAI client is not an instance of AsyncOpenAI. Make sure you passed an AsyncOpenAI client."
+                )
+            return self.afile_content(  # type: ignore
+                file_content_request=file_content_request,
+                openai_client=openai_client,
+            )
+        response = openai_client.files.content(**file_content_request)
+
         return response
 
 

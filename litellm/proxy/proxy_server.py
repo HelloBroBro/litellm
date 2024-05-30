@@ -100,6 +100,13 @@ from litellm.proxy.utils import (
     encrypt_value,
     decrypt_value,
 )
+from litellm import (
+    CreateBatchRequest,
+    RetrieveBatchRequest,
+    ListBatchRequest,
+    CancelBatchRequest,
+    CreateFileRequest,
+)
 from litellm.proxy.secret_managers.google_kms import load_google_kms
 from litellm.proxy.secret_managers.aws_secret_manager import load_aws_secret_manager
 import pydantic
@@ -142,6 +149,7 @@ from fastapi import (
     Request,
     HTTPException,
     status,
+    Path,
     Depends,
     Header,
     Response,
@@ -415,6 +423,7 @@ def get_custom_headers(
     api_base: Optional[str] = None,
     version: Optional[str] = None,
     model_region: Optional[str] = None,
+    fastest_response_batch_completion: Optional[bool] = None,
 ) -> dict:
     exclude_values = {"", None}
     headers = {
@@ -425,6 +434,11 @@ def get_custom_headers(
         "x-litellm-model-region": model_region,
         "x-litellm-key-tpm-limit": str(user_api_key_dict.tpm_limit),
         "x-litellm-key-rpm-limit": str(user_api_key_dict.rpm_limit),
+        "x-litellm-fastest_response_batch_completion": (
+            str(fastest_response_batch_completion)
+            if fastest_response_batch_completion is not None
+            else None
+        ),
     }
     try:
         return {
@@ -703,7 +717,13 @@ async def user_api_key_auth(
                             end_user_params["end_user_rpm_limit"] = (
                                 budget_info.rpm_limit
                             )
+                        if budget_info.max_budget is not None:
+                            end_user_params["end_user_max_budget"] = (
+                                budget_info.max_budget
+                            )
             except Exception as e:
+                if isinstance(e, litellm.BudgetExceededError):
+                    raise e
                 verbose_proxy_logger.debug(
                     "Unable to find user in db. Error - {}".format(str(e))
                 )
@@ -1392,6 +1412,10 @@ async def user_api_key_auth(
             raise Exception()
     except Exception as e:
         traceback.print_exc()
+        if isinstance(e, litellm.BudgetExceededError):
+            raise ProxyException(
+                message=e.message, type="auth_error", param=None, code=400
+            )
         if isinstance(e, HTTPException):
             raise ProxyException(
                 message=getattr(e, "detail", f"Authentication Error({str(e)})"),
@@ -1554,6 +1578,10 @@ async def _PROXY_track_cost_callback(
         user_id = kwargs["litellm_params"]["metadata"].get("user_api_key_user_id", None)
         team_id = kwargs["litellm_params"]["metadata"].get("user_api_key_team_id", None)
         org_id = kwargs["litellm_params"]["metadata"].get("user_api_key_org_id", None)
+        key_alias = kwargs["litellm_params"]["metadata"].get("user_api_key_alias", None)
+        end_user_max_budget = kwargs["litellm_params"]["metadata"].get(
+            "user_api_end_user_max_budget", None
+        )
         if kwargs.get("response_cost", None) is not None:
             response_cost = kwargs["response_cost"]
             user_api_key = kwargs["litellm_params"]["metadata"].get(
@@ -1589,6 +1617,14 @@ async def _PROXY_track_cost_callback(
                     user_id=user_id,
                     end_user_id=end_user_id,
                     response_cost=response_cost,
+                )
+
+                await proxy_logging_obj.slack_alerting_instance.customer_spend_alert(
+                    token=user_api_key,
+                    key_alias=key_alias,
+                    end_user_id=end_user_id,
+                    response_cost=response_cost,
+                    max_budget=end_user_max_budget,
                 )
             else:
                 raise Exception(
@@ -3945,6 +3981,10 @@ async def chat_completion(
         data["metadata"]["user_api_key_alias"] = getattr(
             user_api_key_dict, "key_alias", None
         )
+        data["metadata"]["user_api_end_user_max_budget"] = getattr(
+            user_api_key_dict, "end_user_max_budget", None
+        )
+
         data["metadata"]["global_max_parallel_requests"] = general_settings.get(
             "global_max_parallel_requests", None
         )
@@ -4035,9 +4075,15 @@ async def chat_completion(
         if "api_key" in data:
             tasks.append(litellm.acompletion(**data))
         elif "," in data["model"] and llm_router is not None:
-            _models_csv_string = data.pop("model")
-            _models = _models_csv_string.split(",")
-            tasks.append(llm_router.abatch_completion(models=_models, **data))
+            if (
+                data.get("fastest_response", None) is not None
+                and data["fastest_response"] == True
+            ):
+                tasks.append(llm_router.abatch_completion_fastest_response(**data))
+            else:
+                _models_csv_string = data.pop("model")
+                _models = [model.strip() for model in _models_csv_string.split(",")]
+                tasks.append(llm_router.abatch_completion(models=_models, **data))
         elif "user_config" in data:
             # initialize a new router instance. make request using this Router
             router_config = data.pop("user_config")
@@ -4087,6 +4133,9 @@ async def chat_completion(
         model_id = hidden_params.get("model_id", None) or ""
         cache_key = hidden_params.get("cache_key", None) or ""
         api_base = hidden_params.get("api_base", None) or ""
+        fastest_response_batch_completion = hidden_params.get(
+            "fastest_response_batch_completion", None
+        )
 
         # Post Call Processing
         if llm_router is not None:
@@ -4103,6 +4152,7 @@ async def chat_completion(
                 api_base=api_base,
                 version=version,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+                fastest_response_batch_completion=fastest_response_batch_completion,
             )
             selected_data_generator = select_data_generator(
                 response=response,
@@ -4123,6 +4173,7 @@ async def chat_completion(
                 api_base=api_base,
                 version=version,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+                fastest_response_batch_completion=fastest_response_batch_completion,
             )
         )
 
@@ -4981,6 +5032,447 @@ async def audio_transcriptions(
                 raise HTTPException(status_code=500, detail=str(e))
             finally:
                 os.remove(file.filename)  # Delete the saved file
+
+        ### ALERTING ###
+        data["litellm_status"] = "success"  # used for alerting
+
+        ### RESPONSE HEADERS ###
+        hidden_params = getattr(response, "_hidden_params", {}) or {}
+        model_id = hidden_params.get("model_id", None) or ""
+        cache_key = hidden_params.get("cache_key", None) or ""
+        api_base = hidden_params.get("api_base", None) or ""
+
+        fastapi_response.headers.update(
+            get_custom_headers(
+                user_api_key_dict=user_api_key_dict,
+                model_id=model_id,
+                cache_key=cache_key,
+                api_base=api_base,
+                version=version,
+                model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+            )
+        )
+
+        return response
+    except Exception as e:
+        data["litellm_status"] = "fail"  # used for alerting
+        await proxy_logging_obj.post_call_failure_hook(
+            user_api_key_dict=user_api_key_dict, original_exception=e, request_data=data
+        )
+        traceback.print_exc()
+        if isinstance(e, HTTPException):
+            raise ProxyException(
+                message=getattr(e, "message", str(e.detail)),
+                type=getattr(e, "type", "None"),
+                param=getattr(e, "param", "None"),
+                code=getattr(e, "status_code", status.HTTP_400_BAD_REQUEST),
+            )
+        else:
+            error_traceback = traceback.format_exc()
+            error_msg = f"{str(e)}"
+            raise ProxyException(
+                message=getattr(e, "message", error_msg),
+                type=getattr(e, "type", "None"),
+                param=getattr(e, "param", "None"),
+                code=getattr(e, "status_code", 500),
+            )
+
+
+######################################################################
+
+#                          /v1/batches Endpoints
+
+
+######################################################################
+@router.post(
+    "/v1/batches",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["batch"],
+)
+@router.post(
+    "/batches",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["batch"],
+)
+async def create_batch(
+    request: Request,
+    fastapi_response: Response,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """
+    Create large batches of API requests for asynchronous processing.
+    This is the equivalent of POST https://api.openai.com/v1/batch
+    Supports Identical Params as: https://platform.openai.com/docs/api-reference/batch
+
+    Example Curl
+    ```
+    curl http://localhost:4000/v1/batches \
+        -H "Authorization: Bearer sk-1234" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "input_file_id": "file-abc123",
+            "endpoint": "/v1/chat/completions",
+            "completion_window": "24h"
+    }'
+    ```
+    """
+    global proxy_logging_obj
+    data: Dict = {}
+    try:
+        # Use orjson to parse JSON data, orjson speeds up requests significantly
+        form_data = await request.form()
+        data = {key: value for key, value in form_data.items() if key != "file"}
+
+        # Include original request and headers in the data
+        data["proxy_server_request"] = {  # type: ignore
+            "url": str(request.url),
+            "method": request.method,
+            "headers": dict(request.headers),
+            "body": copy.copy(data),  # use copy instead of deepcopy
+        }
+
+        if data.get("user", None) is None and user_api_key_dict.user_id is not None:
+            data["user"] = user_api_key_dict.user_id
+
+        if "metadata" not in data:
+            data["metadata"] = {}
+        data["metadata"]["user_api_key"] = user_api_key_dict.api_key
+        data["metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
+        _headers = dict(request.headers)
+        _headers.pop(
+            "authorization", None
+        )  # do not store the original `sk-..` api key in the db
+        data["metadata"]["headers"] = _headers
+        data["metadata"]["user_api_key_alias"] = getattr(
+            user_api_key_dict, "key_alias", None
+        )
+        data["metadata"]["user_api_key_user_id"] = user_api_key_dict.user_id
+        data["metadata"]["user_api_key_team_id"] = getattr(
+            user_api_key_dict, "team_id", None
+        )
+        data["metadata"]["global_max_parallel_requests"] = general_settings.get(
+            "global_max_parallel_requests", None
+        )
+        data["metadata"]["user_api_key_team_alias"] = getattr(
+            user_api_key_dict, "team_alias", None
+        )
+        data["metadata"]["endpoint"] = str(request.url)
+
+        ### TEAM-SPECIFIC PARAMS ###
+        if user_api_key_dict.team_id is not None:
+            team_config = await proxy_config.load_team_config(
+                team_id=user_api_key_dict.team_id
+            )
+            if len(team_config) == 0:
+                pass
+            else:
+                team_id = team_config.pop("team_id", None)
+                data["metadata"]["team_id"] = team_id
+                data = {
+                    **team_config,
+                    **data,
+                }  # add the team-specific configs to the completion call
+
+        _create_batch_data = CreateBatchRequest(**data)
+
+        # for now use custom_llm_provider=="openai" -> this will change as LiteLLM adds more providers for acreate_batch
+        response = await litellm.acreate_batch(
+            custom_llm_provider="openai", **_create_batch_data
+        )
+
+        ### ALERTING ###
+        data["litellm_status"] = "success"  # used for alerting
+
+        ### RESPONSE HEADERS ###
+        hidden_params = getattr(response, "_hidden_params", {}) or {}
+        model_id = hidden_params.get("model_id", None) or ""
+        cache_key = hidden_params.get("cache_key", None) or ""
+        api_base = hidden_params.get("api_base", None) or ""
+
+        fastapi_response.headers.update(
+            get_custom_headers(
+                user_api_key_dict=user_api_key_dict,
+                model_id=model_id,
+                cache_key=cache_key,
+                api_base=api_base,
+                version=version,
+                model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+            )
+        )
+
+        return response
+    except Exception as e:
+        data["litellm_status"] = "fail"  # used for alerting
+        await proxy_logging_obj.post_call_failure_hook(
+            user_api_key_dict=user_api_key_dict, original_exception=e, request_data=data
+        )
+        traceback.print_exc()
+        if isinstance(e, HTTPException):
+            raise ProxyException(
+                message=getattr(e, "message", str(e.detail)),
+                type=getattr(e, "type", "None"),
+                param=getattr(e, "param", "None"),
+                code=getattr(e, "status_code", status.HTTP_400_BAD_REQUEST),
+            )
+        else:
+            error_traceback = traceback.format_exc()
+            error_msg = f"{str(e)}"
+            raise ProxyException(
+                message=getattr(e, "message", error_msg),
+                type=getattr(e, "type", "None"),
+                param=getattr(e, "param", "None"),
+                code=getattr(e, "status_code", 500),
+            )
+
+
+@router.get(
+    "/v1/batches{batch_id}",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["batch"],
+)
+@router.get(
+    "/batches{batch_id}",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["batch"],
+)
+async def retrieve_batch(
+    request: Request,
+    fastapi_response: Response,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+    batch_id: str = Path(
+        title="Batch ID to retrieve", description="The ID of the batch to retrieve"
+    ),
+):
+    """
+    Retrieves a batch.
+    This is the equivalent of GET https://api.openai.com/v1/batches/{batch_id}
+    Supports Identical Params as: https://platform.openai.com/docs/api-reference/batch/retrieve
+
+    Example Curl
+    ```
+    curl http://localhost:4000/v1/batches/batch_abc123 \
+    -H "Authorization: Bearer sk-1234" \
+    -H "Content-Type: application/json" \
+
+    ```
+    """
+    global proxy_logging_obj
+    data: Dict = {}
+    try:
+        # Use orjson to parse JSON data, orjson speeds up requests significantly
+        form_data = await request.form()
+        data = {key: value for key, value in form_data.items() if key != "file"}
+
+        # Include original request and headers in the data
+        data["proxy_server_request"] = {  # type: ignore
+            "url": str(request.url),
+            "method": request.method,
+            "headers": dict(request.headers),
+            "body": copy.copy(data),  # use copy instead of deepcopy
+        }
+
+        if data.get("user", None) is None and user_api_key_dict.user_id is not None:
+            data["user"] = user_api_key_dict.user_id
+
+        if "metadata" not in data:
+            data["metadata"] = {}
+        data["metadata"]["user_api_key"] = user_api_key_dict.api_key
+        data["metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
+        _headers = dict(request.headers)
+        _headers.pop(
+            "authorization", None
+        )  # do not store the original `sk-..` api key in the db
+        data["metadata"]["headers"] = _headers
+        data["metadata"]["user_api_key_alias"] = getattr(
+            user_api_key_dict, "key_alias", None
+        )
+        data["metadata"]["user_api_key_user_id"] = user_api_key_dict.user_id
+        data["metadata"]["user_api_key_team_id"] = getattr(
+            user_api_key_dict, "team_id", None
+        )
+        data["metadata"]["global_max_parallel_requests"] = general_settings.get(
+            "global_max_parallel_requests", None
+        )
+        data["metadata"]["user_api_key_team_alias"] = getattr(
+            user_api_key_dict, "team_alias", None
+        )
+        data["metadata"]["endpoint"] = str(request.url)
+
+        ### TEAM-SPECIFIC PARAMS ###
+        if user_api_key_dict.team_id is not None:
+            team_config = await proxy_config.load_team_config(
+                team_id=user_api_key_dict.team_id
+            )
+            if len(team_config) == 0:
+                pass
+            else:
+                team_id = team_config.pop("team_id", None)
+                data["metadata"]["team_id"] = team_id
+                data = {
+                    **team_config,
+                    **data,
+                }  # add the team-specific configs to the completion call
+
+        _retrieve_batch_request = RetrieveBatchRequest(
+            batch_id=batch_id,
+        )
+
+        # for now use custom_llm_provider=="openai" -> this will change as LiteLLM adds more providers for acreate_batch
+        response = await litellm.aretrieve_batch(
+            custom_llm_provider="openai", **_retrieve_batch_request
+        )
+
+        ### ALERTING ###
+        data["litellm_status"] = "success"  # used for alerting
+
+        ### RESPONSE HEADERS ###
+        hidden_params = getattr(response, "_hidden_params", {}) or {}
+        model_id = hidden_params.get("model_id", None) or ""
+        cache_key = hidden_params.get("cache_key", None) or ""
+        api_base = hidden_params.get("api_base", None) or ""
+
+        fastapi_response.headers.update(
+            get_custom_headers(
+                user_api_key_dict=user_api_key_dict,
+                model_id=model_id,
+                cache_key=cache_key,
+                api_base=api_base,
+                version=version,
+                model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+            )
+        )
+
+        return response
+    except Exception as e:
+        data["litellm_status"] = "fail"  # used for alerting
+        await proxy_logging_obj.post_call_failure_hook(
+            user_api_key_dict=user_api_key_dict, original_exception=e, request_data=data
+        )
+        traceback.print_exc()
+        if isinstance(e, HTTPException):
+            raise ProxyException(
+                message=getattr(e, "message", str(e.detail)),
+                type=getattr(e, "type", "None"),
+                param=getattr(e, "param", "None"),
+                code=getattr(e, "status_code", status.HTTP_400_BAD_REQUEST),
+            )
+        else:
+            error_traceback = traceback.format_exc()
+            error_msg = f"{str(e)}"
+            raise ProxyException(
+                message=getattr(e, "message", error_msg),
+                type=getattr(e, "type", "None"),
+                param=getattr(e, "param", "None"),
+                code=getattr(e, "status_code", 500),
+            )
+
+
+######################################################################
+
+#            END OF  /v1/batches Endpoints Implementation
+
+######################################################################
+
+
+######################################################################
+
+#                          /v1/files Endpoints
+
+
+######################################################################
+@router.post(
+    "/v1/files",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["files"],
+)
+@router.post(
+    "/files",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["files"],
+)
+async def create_file(
+    request: Request,
+    fastapi_response: Response,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """
+    Upload a file that can be used across - Assistants API, Batch API 
+    This is the equivalent of POST https://api.openai.com/v1/files
+
+    Supports Identical Params as: https://platform.openai.com/docs/api-reference/files/create
+
+    Example Curl
+    ```
+    curl https://api.openai.com/v1/files \
+        -H "Authorization: Bearer sk-1234" \
+        -F purpose="batch" \
+        -F file="@mydata.jsonl"
+
+    ```
+    """
+    global proxy_logging_obj
+    data: Dict = {}
+    try:
+        # Use orjson to parse JSON data, orjson speeds up requests significantly
+        form_data = await request.form()
+        data = {key: value for key, value in form_data.items() if key != "file"}
+
+        # Include original request and headers in the data
+        data["proxy_server_request"] = {  # type: ignore
+            "url": str(request.url),
+            "method": request.method,
+            "headers": dict(request.headers),
+            "body": copy.copy(data),  # use copy instead of deepcopy
+        }
+
+        if data.get("user", None) is None and user_api_key_dict.user_id is not None:
+            data["user"] = user_api_key_dict.user_id
+
+        if "metadata" not in data:
+            data["metadata"] = {}
+        data["metadata"]["user_api_key"] = user_api_key_dict.api_key
+        data["metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
+        _headers = dict(request.headers)
+        _headers.pop(
+            "authorization", None
+        )  # do not store the original `sk-..` api key in the db
+        data["metadata"]["headers"] = _headers
+        data["metadata"]["user_api_key_alias"] = getattr(
+            user_api_key_dict, "key_alias", None
+        )
+        data["metadata"]["user_api_key_user_id"] = user_api_key_dict.user_id
+        data["metadata"]["user_api_key_team_id"] = getattr(
+            user_api_key_dict, "team_id", None
+        )
+        data["metadata"]["global_max_parallel_requests"] = general_settings.get(
+            "global_max_parallel_requests", None
+        )
+        data["metadata"]["user_api_key_team_alias"] = getattr(
+            user_api_key_dict, "team_alias", None
+        )
+        data["metadata"]["endpoint"] = str(request.url)
+
+        ### TEAM-SPECIFIC PARAMS ###
+        if user_api_key_dict.team_id is not None:
+            team_config = await proxy_config.load_team_config(
+                team_id=user_api_key_dict.team_id
+            )
+            if len(team_config) == 0:
+                pass
+            else:
+                team_id = team_config.pop("team_id", None)
+                data["metadata"]["team_id"] = team_id
+                data = {
+                    **team_config,
+                    **data,
+                }  # add the team-specific configs to the completion call
+
+        _create_file_request = CreateFileRequest()
+
+        # for now use custom_llm_provider=="openai" -> this will change as LiteLLM adds more providers for acreate_batch
+        response = await litellm.acreate_file(
+            custom_llm_provider="openai", **_create_file_request
+        )
 
         ### ALERTING ###
         data["litellm_status"] = "success"  # used for alerting
@@ -6129,14 +6621,13 @@ async def get_global_activity_model(
 
         sql_query = """
         SELECT
-            model_group AS model,
+            model_group,
             date_trunc('day', "startTime") AS date,
             COUNT(*) AS api_requests,
             SUM(total_tokens) AS total_tokens
         FROM "LiteLLM_SpendLogs"
         WHERE "startTime" BETWEEN $1::date AND $2::date + interval '1 day'
-        GROUP BY model, date_trunc('day', "startTime")
-
+        GROUP BY model_group, date_trunc('day', "startTime")
         """
         db_response = await prisma_client.db.query_raw(
             sql_query, start_date_obj, end_date_obj
@@ -6149,7 +6640,7 @@ async def get_global_activity_model(
         )  # {"gpt-4": {"daily_data": [], "sum_api_requests": 0, "sum_total_tokens": 0}}
 
         for row in db_response:
-            _model = row["model"]
+            _model = row["model_group"]
             if _model not in model_ui_data:
                 model_ui_data[_model] = {
                     "daily_data": [],
@@ -6189,7 +6680,7 @@ async def get_global_activity_model(
 
     except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": str(e)},
         )
 
@@ -7946,6 +8437,7 @@ async def new_end_user(
     "/customer/info",
     tags=["Customer Management"],
     dependencies=[Depends(user_api_key_auth)],
+    response_model=LiteLLM_EndUserTable,
 )
 @router.get(
     "/end_user/info",
@@ -7970,7 +8462,12 @@ async def end_user_info(
         where={"user_id": end_user_id}
     )
 
-    return user_info
+    if user_info is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "End User Id={} does not exist in db".format(end_user_id)},
+        )
+    return user_info.model_dump(exclude_none=True)
 
 
 @router.post(
@@ -9718,7 +10215,7 @@ async def model_metrics(
             model_group,
             model,
             DATE_TRUNC('day', "startTime")::DATE AS day,
-            AVG(EXTRACT(epoch FROM ("endTime" - "startTime"))) / SUM(total_tokens) AS avg_latency_per_token
+            AVG(EXTRACT(epoch FROM ("endTime" - "startTime")) / "completion_tokens") AS avg_latency_per_token
         FROM
             "LiteLLM_SpendLogs"
         WHERE
@@ -9730,7 +10227,7 @@ async def model_metrics(
             model,
             day
         HAVING
-            SUM(total_tokens) > 0
+            SUM(completion_tokens) > 0
         ORDER BY
             avg_latency_per_token DESC;
     """
@@ -12628,54 +13125,6 @@ async def token_generate():
     token = auth_jwt_sso.create_access_token()
 
     return {"token": token}
-
-
-# @router.post("/update_database", dependencies=[Depends(user_api_key_auth)])
-# async def update_database_endpoint(
-#     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
-# ):
-#     """
-#     Test endpoint. DO NOT MERGE IN PROD.
-
-#     Used for isolating and testing our prisma db update logic in high-traffic.
-#     """
-#     try:
-#         request_id = f"chatcmpl-e41836bb-bb8b-4df2-8e70-8f3e160155ac{time.time()}"
-#         resp = litellm.ModelResponse(
-#             id=request_id,
-#             choices=[
-#                 litellm.Choices(
-#                     finish_reason=None,
-#                     index=0,
-#                     message=litellm.Message(
-#                         content=" Sure! Here is a short poem about the sky:\n\nA canvas of blue, a",
-#                         role="assistant",
-#                     ),
-#                 )
-#             ],
-#             model="gpt-35-turbo",  # azure always has model written like this
-#             usage=litellm.Usage(
-#                 prompt_tokens=210, completion_tokens=200, total_tokens=410
-#             ),
-#         )
-#         await _PROXY_track_cost_callback(
-#             kwargs={
-#                 "model": "chatgpt-v-2",
-#                 "stream": False,
-#                 "litellm_params": {
-#                     "metadata": {
-#                         "user_api_key": user_api_key_dict.token,
-#                         "user_api_key_user_id": user_api_key_dict.user_id,
-#                     }
-#                 },
-#                 "response_cost": 0.00002,
-#             },
-#             completion_response=resp,
-#             start_time=datetime.now(),
-#             end_time=datetime.now(),
-#         )
-#     except Exception as e:
-#         raise e
 
 
 def _has_user_setup_sso():
