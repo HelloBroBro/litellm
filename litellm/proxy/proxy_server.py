@@ -79,6 +79,9 @@ def generate_feedback_box():
 
 
 import litellm
+from litellm.types.llms.openai import (
+    HttpxBinaryResponseContent,
+)
 from litellm.proxy.utils import (
     PrismaClient,
     DBClient,
@@ -507,7 +510,7 @@ async def user_api_key_auth(
 
         if route in LiteLLMRoutes.public_routes.value:
             # check if public endpoint
-            return UserAPIKeyAuth(user_role="app_owner")
+            return UserAPIKeyAuth(user_role=LitellmUserRoles.INTERNAL_USER_VIEW_ONLY)
 
         if general_settings.get("enable_jwt_auth", False) == True:
             is_jwt = jwt_handler.is_jwt(token=api_key)
@@ -524,12 +527,12 @@ async def user_api_key_auth(
                 if is_admin:
                     # check allowed admin routes
                     is_allowed = allowed_routes_check(
-                        user_role="proxy_admin",
+                        user_role=LitellmUserRoles.PROXY_ADMIN,
                         user_route=route,
                         litellm_proxy_roles=jwt_handler.litellm_jwtauth,
                     )
                     if is_allowed:
-                        return UserAPIKeyAuth(user_role="proxy_admin")
+                        return UserAPIKeyAuth(user_role=LitellmUserRoles.PROXY_ADMIN)
                     else:
                         allowed_routes = (
                             jwt_handler.litellm_jwtauth.admin_allowed_routes
@@ -552,7 +555,7 @@ async def user_api_key_auth(
                 if team_id is not None:
                     # check allowed team routes
                     is_allowed = allowed_routes_check(
-                        user_role="team",
+                        user_role=LitellmUserRoles.TEAM,
                         user_route=route,
                         litellm_proxy_roles=jwt_handler.litellm_jwtauth,
                     )
@@ -664,16 +667,18 @@ async def user_api_key_auth(
                         team_object.rpm_limit if team_object is not None else None
                     ),
                     team_models=team_object.models if team_object is not None else [],
-                    user_role="app_owner",
+                    user_role=LitellmUserRoles.INTERNAL_USER,
                     user_id=user_id,
                     org_id=org_id,
                 )
         #### ELSE ####
         if master_key is None:
             if isinstance(api_key, str):
-                return UserAPIKeyAuth(api_key=api_key, user_role="proxy_admin")
+                return UserAPIKeyAuth(
+                    api_key=api_key, user_role=LitellmUserRoles.PROXY_ADMIN
+                )
             else:
-                return UserAPIKeyAuth(user_role="proxy_admin")
+                return UserAPIKeyAuth(user_role=LitellmUserRoles.PROXY_ADMIN)
         elif api_key is None:  # only require api key if master key is set
             raise Exception("No api key passed in.")
         elif api_key == "":
@@ -740,7 +745,7 @@ async def user_api_key_auth(
         if (
             valid_token is not None
             and isinstance(valid_token, UserAPIKeyAuth)
-            and valid_token.user_role == "proxy_admin"
+            and valid_token.user_role == LitellmUserRoles.PROXY_ADMIN
         ):
             # update end-user params on valid token
             valid_token.end_user_id = end_user_params.get("end_user_id")
@@ -773,7 +778,7 @@ async def user_api_key_auth(
         if is_master_key_valid:
             _user_api_key_obj = UserAPIKeyAuth(
                 api_key=master_key,
-                user_role="proxy_admin",
+                user_role=LitellmUserRoles.PROXY_ADMIN,
                 user_id=litellm_proxy_admin_name,
                 **end_user_params,
             )
@@ -1377,7 +1382,9 @@ async def user_api_key_auth(
                     user_id_information
                 ):
                     return UserAPIKeyAuth(
-                        api_key=api_key, user_role="proxy_admin", **valid_token_dict
+                        api_key=api_key,
+                        user_role=LitellmUserRoles.PROXY_ADMIN,
+                        **valid_token_dict,
                     )
                 elif (
                     _has_user_setup_sso()
@@ -1398,15 +1405,21 @@ async def user_api_key_auth(
                 user_id_information
             ):
                 return UserAPIKeyAuth(
-                    api_key=api_key, user_role="proxy_admin", **valid_token_dict
+                    api_key=api_key,
+                    user_role=LitellmUserRoles.PROXY_ADMIN,
+                    **valid_token_dict,
                 )
             elif _has_user_setup_sso() and route in LiteLLMRoutes.sso_only_routes.value:
                 return UserAPIKeyAuth(
-                    api_key=api_key, user_role="app_owner", **valid_token_dict
+                    api_key=api_key,
+                    user_role=LitellmUserRoles.INTERNAL_USER,
+                    **valid_token_dict,
                 )
             else:
                 return UserAPIKeyAuth(
-                    api_key=api_key, user_role="app_owner", **valid_token_dict
+                    api_key=api_key,
+                    user_role=LitellmUserRoles.INTERNAL_USER,
+                    **valid_token_dict,
                 )
         else:
             raise Exception()
@@ -2335,7 +2348,7 @@ class ProxyConfig:
                     ## to pass a complete url, or set ssl=True, etc. just set it as `os.environ[REDIS_URL] = <your-redis-url>`, _redis.py checks for REDIS specific environment variables
                     self._init_cache(cache_params=cache_params)
                     if litellm.cache is not None:
-                        print(  # noqa
+                        verbose_proxy_logger.debug(  # noqa
                             f"{blue_color_code}Set Cache on LiteLLM Proxy: {vars(litellm.cache.cache)}{reset_color_code}"
                         )
                 elif key == "cache" and value == False:
@@ -3738,11 +3751,9 @@ async def startup_event():
                 spend=0,
                 token=master_key,
                 user_id=litellm_proxy_admin_name,
-                user_role="proxy_admin",
+                user_role=LitellmUserRoles.PROXY_ADMIN,
                 query_type="update_data",
-                update_key_values={
-                    "user_role": "proxy_admin",
-                },
+                update_key_values={"user_role": LitellmUserRoles.PROXY_ADMIN},
             )
         )
 
@@ -4873,6 +4884,169 @@ async def image_generation(
                 param=getattr(e, "param", "None"),
                 code=getattr(e, "status_code", 500),
             )
+
+
+@router.post(
+    "/v1/audio/speech",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["audio"],
+)
+@router.post(
+    "/audio/speech",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["audio"],
+)
+async def audio_speech(
+    request: Request,
+    fastapi_response: Response,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """
+    Same params as:
+
+    https://platform.openai.com/docs/api-reference/audio/createSpeech
+    """
+    global proxy_logging_obj
+    data: Dict = {}
+    try:
+        # Use orjson to parse JSON data, orjson speeds up requests significantly
+        body = await request.body()
+        data = orjson.loads(body)
+
+        # Include original request and headers in the data
+        data["proxy_server_request"] = {  # type: ignore
+            "url": str(request.url),
+            "method": request.method,
+            "headers": dict(request.headers),
+            "body": copy.copy(data),  # use copy instead of deepcopy
+        }
+
+        if data.get("user", None) is None and user_api_key_dict.user_id is not None:
+            data["user"] = user_api_key_dict.user_id
+
+        if user_model:
+            data["model"] = user_model
+
+        if "metadata" not in data:
+            data["metadata"] = {}
+        data["metadata"]["user_api_key"] = user_api_key_dict.api_key
+        data["metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
+        _headers = dict(request.headers)
+        _headers.pop(
+            "authorization", None
+        )  # do not store the original `sk-..` api key in the db
+        data["metadata"]["headers"] = _headers
+        data["metadata"]["user_api_key_alias"] = getattr(
+            user_api_key_dict, "key_alias", None
+        )
+        data["metadata"]["user_api_key_user_id"] = user_api_key_dict.user_id
+        data["metadata"]["user_api_key_team_id"] = getattr(
+            user_api_key_dict, "team_id", None
+        )
+        data["metadata"]["global_max_parallel_requests"] = general_settings.get(
+            "global_max_parallel_requests", None
+        )
+        data["metadata"]["user_api_key_team_alias"] = getattr(
+            user_api_key_dict, "team_alias", None
+        )
+        data["metadata"]["endpoint"] = str(request.url)
+
+        ### TEAM-SPECIFIC PARAMS ###
+        if user_api_key_dict.team_id is not None:
+            team_config = await proxy_config.load_team_config(
+                team_id=user_api_key_dict.team_id
+            )
+            if len(team_config) == 0:
+                pass
+            else:
+                team_id = team_config.pop("team_id", None)
+                data["metadata"]["team_id"] = team_id
+                data = {
+                    **team_config,
+                    **data,
+                }  # add the team-specific configs to the completion call
+
+        router_model_names = llm_router.model_names if llm_router is not None else []
+
+        ### CALL HOOKS ### - modify incoming data / reject request before calling the model
+        data = await proxy_logging_obj.pre_call_hook(
+            user_api_key_dict=user_api_key_dict, data=data, call_type="image_generation"
+        )
+
+        ## ROUTE TO CORRECT ENDPOINT ##
+        # skip router if user passed their key
+        if "api_key" in data:
+            response = await litellm.aspeech(**data)
+        elif (
+            llm_router is not None and data["model"] in router_model_names
+        ):  # model in router model list
+            response = await llm_router.aspeech(**data)
+        elif (
+            llm_router is not None and data["model"] in llm_router.deployment_names
+        ):  # model in router deployments, calling a specific deployment on the router
+            response = await llm_router.aspeech(**data, specific_deployment=True)
+        elif (
+            llm_router is not None
+            and llm_router.model_group_alias is not None
+            and data["model"] in llm_router.model_group_alias
+        ):  # model set in model_group_alias
+            response = await llm_router.aspeech(
+                **data
+            )  # ensure this goes the llm_router, router will do the correct alias mapping
+        elif (
+            llm_router is not None
+            and data["model"] not in router_model_names
+            and llm_router.default_deployment is not None
+        ):  # model in router deployments, calling a specific deployment on the router
+            response = await llm_router.aspeech(**data)
+        elif user_model is not None:  # `litellm --model <your-model-name>`
+            response = await litellm.aspeech(**data)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": "audio_speech: Invalid model name passed in model="
+                    + data.get("model", "")
+                },
+            )
+
+        ### ALERTING ###
+        data["litellm_status"] = "success"  # used for alerting
+
+        ### RESPONSE HEADERS ###
+        hidden_params = getattr(response, "_hidden_params", {}) or {}
+        model_id = hidden_params.get("model_id", None) or ""
+        cache_key = hidden_params.get("cache_key", None) or ""
+        api_base = hidden_params.get("api_base", None) or ""
+
+        # Printing each chunk size
+        async def generate(_response: HttpxBinaryResponseContent):
+            _generator = await _response.aiter_bytes(chunk_size=1024)
+            async for chunk in _generator:
+                yield chunk
+
+        custom_headers = get_custom_headers(
+            user_api_key_dict=user_api_key_dict,
+            model_id=model_id,
+            cache_key=cache_key,
+            api_base=api_base,
+            version=version,
+            model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+            fastest_response_batch_completion=None,
+        )
+
+        selected_data_generator = select_data_generator(
+            response=response,
+            user_api_key_dict=user_api_key_dict,
+            request_data=data,
+        )
+        return StreamingResponse(
+            generate(response), media_type="audio/mpeg", headers=custom_headers
+        )
+
+    except Exception as e:
+        traceback.print_exc()
+        raise e
 
 
 @router.post(
@@ -6093,7 +6267,7 @@ async def delete_key_fn(
         )
         if (
             user_api_key_dict.user_role is not None
-            and user_api_key_dict.user_role == "proxy_admin"
+            and user_api_key_dict.user_role == LitellmUserRoles.PROXY_ADMIN
         ):
             user_id = None  # unless they're admin
 
@@ -6681,6 +6855,265 @@ async def get_global_activity_model(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": str(e)},
+        )
+
+
+@router.get(
+    "/global/activity/exceptions/deployment",
+    tags=["Budget & Spend Tracking"],
+    dependencies=[Depends(user_api_key_auth)],
+    responses={
+        200: {"model": List[LiteLLM_SpendLogs]},
+    },
+)
+async def get_global_activity_exceptions_per_deployment(
+    model_group: str = fastapi.Query(
+        description="Filter by model group",
+    ),
+    start_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="Time from which to start viewing spend",
+    ),
+    end_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="Time till which to view spend",
+    ),
+):
+    """
+    Get number of 429 errors - Grouped by deployment
+
+    [
+        {
+            "deployment": "https://azure-us-east-1.openai.azure.com/",
+            "daily_data": [
+                    const chartdata = [
+                    {
+                    date: 'Jan 22',
+                    num_rate_limit_exceptions: 10
+                    },
+                    {
+                    date: 'Jan 23',
+                    num_rate_limit_exceptions: 12
+                    },
+            ],
+            "sum_num_rate_limit_exceptions": 20,
+
+        },
+        {
+            "deployment": "https://azure-us-east-1.openai.azure.com/",
+            "daily_data": [
+                    const chartdata = [
+                    {
+                    date: 'Jan 22',
+                    num_rate_limit_exceptions: 10,
+                    },
+                    {
+                    date: 'Jan 23',
+                    num_rate_limit_exceptions: 12
+                    },
+            ],
+            "sum_num_rate_limit_exceptions": 20,
+
+        },
+    ]
+    """
+    from collections import defaultdict
+
+    if start_date is None or end_date is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Please provide start_date and end_date"},
+        )
+
+    start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
+    end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+
+    global prisma_client, llm_router, premium_user
+    try:
+        if prisma_client is None:
+            raise Exception(
+                f"Database not connected. Connect a database to your proxy - https://docs.litellm.ai/docs/simple_proxy#managing-auth---virtual-keys"
+            )
+
+        sql_query = """
+        SELECT
+            api_base,
+            date_trunc('day', "startTime")::date AS date,
+            COUNT(*) AS num_rate_limit_exceptions
+        FROM
+            "LiteLLM_ErrorLogs"
+        WHERE
+            "startTime" >= $1::date
+            AND "startTime" < ($2::date + INTERVAL '1 day')
+            AND model_group = $3
+            AND status_code = '429'
+        GROUP BY
+            api_base,
+            date_trunc('day', "startTime")
+        ORDER BY
+            date;
+        """
+        db_response = await prisma_client.db.query_raw(
+            sql_query, start_date_obj, end_date_obj, model_group
+        )
+        if db_response is None:
+            return []
+
+        model_ui_data: dict = (
+            {}
+        )  # {"gpt-4": {"daily_data": [], "sum_api_requests": 0, "sum_total_tokens": 0}}
+
+        for row in db_response:
+            _model = row["api_base"]
+            if _model not in model_ui_data:
+                model_ui_data[_model] = {
+                    "daily_data": [],
+                    "sum_num_rate_limit_exceptions": 0,
+                }
+            _date_obj = datetime.fromisoformat(row["date"])
+            row["date"] = _date_obj.strftime("%b %d")
+
+            model_ui_data[_model]["daily_data"].append(row)
+            model_ui_data[_model]["sum_num_rate_limit_exceptions"] += row.get(
+                "num_rate_limit_exceptions", 0
+            )
+
+        # sort mode ui data by sum_api_requests -> get top 10 models
+        model_ui_data = dict(
+            sorted(
+                model_ui_data.items(),
+                key=lambda x: x[1]["sum_num_rate_limit_exceptions"],
+                reverse=True,
+            )[:10]
+        )
+
+        response = []
+        for model, data in model_ui_data.items():
+            _sort_daily_data = sorted(data["daily_data"], key=lambda x: x["date"])
+
+            response.append(
+                {
+                    "api_base": model,
+                    "daily_data": _sort_daily_data,
+                    "sum_num_rate_limit_exceptions": data[
+                        "sum_num_rate_limit_exceptions"
+                    ],
+                }
+            )
+
+        return response
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": str(e)},
+        )
+
+
+@router.get(
+    "/global/activity/exceptions",
+    tags=["Budget & Spend Tracking"],
+    dependencies=[Depends(user_api_key_auth)],
+    responses={
+        200: {"model": List[LiteLLM_SpendLogs]},
+    },
+)
+async def get_global_activity_exceptions(
+    model_group: str = fastapi.Query(
+        description="Filter by model group",
+    ),
+    start_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="Time from which to start viewing spend",
+    ),
+    end_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="Time till which to view spend",
+    ),
+):
+    """
+    Get number of API Requests, total tokens through proxy
+
+    {
+        "daily_data": [
+                const chartdata = [
+                {
+                date: 'Jan 22',
+                num_rate_limit_exceptions: 10,
+                },
+                {
+                date: 'Jan 23',
+                num_rate_limit_exceptions: 10,
+                },
+        ],
+        "sum_api_exceptions": 20,
+    }
+    """
+    from collections import defaultdict
+
+    if start_date is None or end_date is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Please provide start_date and end_date"},
+        )
+
+    start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
+    end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+
+    global prisma_client, llm_router
+    try:
+        if prisma_client is None:
+            raise Exception(
+                f"Database not connected. Connect a database to your proxy - https://docs.litellm.ai/docs/simple_proxy#managing-auth---virtual-keys"
+            )
+
+        sql_query = """
+        SELECT
+            date_trunc('day', "startTime")::date AS date,
+            COUNT(*) AS num_rate_limit_exceptions
+        FROM
+            "LiteLLM_ErrorLogs"
+        WHERE
+            "startTime" >= $1::date
+            AND "startTime" < ($2::date + INTERVAL '1 day')
+            AND model_group = $3
+            AND status_code = '429'
+        GROUP BY
+            date_trunc('day', "startTime")
+        ORDER BY
+            date;
+        """
+        db_response = await prisma_client.db.query_raw(
+            sql_query, start_date_obj, end_date_obj, model_group
+        )
+
+        if db_response is None:
+            return []
+
+        sum_num_rate_limit_exceptions = 0
+        daily_data = []
+        for row in db_response:
+            # cast date to datetime
+            _date_obj = datetime.fromisoformat(row["date"])
+            row["date"] = _date_obj.strftime("%b %d")
+
+            daily_data.append(row)
+            sum_num_rate_limit_exceptions += row.get("num_rate_limit_exceptions", 0)
+
+        # sort daily_data by date
+        daily_data = sorted(daily_data, key=lambda x: x["date"])
+
+        data_to_return = {
+            "daily_data": daily_data,
+            "sum_num_rate_limit_exceptions": sum_num_rate_limit_exceptions,
+        }
+
+        return data_to_return
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": str(e)},
         )
 
@@ -7689,16 +8122,6 @@ async def new_user(data: NewUserRequest):
     - max_budget: (float|None) Max budget for given user.
     """
     data_json = data.json()  # type: ignore
-    if "user_role" in data_json:
-        user_role = data_json["user_role"]
-        if user_role is not None:
-            if user_role not in ["proxy_admin", "app_owner", "app_user"]:
-                raise ProxyException(
-                    message=f"Invalid user role, passed in {user_role}. Must be one of 'admin', 'app_owner', 'app_user'",
-                    type="invalid_user_role",
-                    param="user_role",
-                    code=status.HTTP_400_BAD_REQUEST,
-                )
     if "user_id" in data_json and data_json["user_id"] is None:
         data_json["user_id"] = str(uuid.uuid4())
     auto_create_key = data_json.pop("auto_create_key", True)
@@ -7793,7 +8216,6 @@ async def user_auth(request: Request):
 
     params = {
         "sender_name": "LiteLLM Proxy",
-        "sender_email": os.getenv("SMTP_SENDER_EMAIL"),
         "receiver_email": user_email,
         "subject": "Your Magic Link",
         "html": f"<strong> Follow this  link, to login:\n\n{base_url}user/?token={response['token']}&user_id={response['user_id']}&page={page_params}</strong>",
@@ -7801,6 +8223,42 @@ async def user_auth(request: Request):
 
     await send_email(**params)
     return "Email sent!"
+
+
+@router.get(
+    "/user/available_roles",
+    tags=["Internal User management"],
+    include_in_schema=False,
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def ui_get_available_role(
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """
+    Endpoint used by Admin UI to show all available roles to assign a user
+    return {
+        "proxy_admin": {
+            "description": "Proxy Admin role",
+            "ui_label": "Admin"
+        }
+    }
+    """
+
+    _data_to_return = {}
+    for role in LitellmUserRoles:
+
+        # We only show a subset of roles on UI
+        if role in [
+            LitellmUserRoles.PROXY_ADMIN,
+            LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY,
+            LitellmUserRoles.INTERNAL_USER,
+            LitellmUserRoles.INTERNAL_USER_VIEW_ONLY,
+        ]:
+            _data_to_return[role.value] = {
+                "description": role.description,
+                "ui_label": role.ui_label,
+            }
+    return _data_to_return
 
 
 @router.get(
@@ -7888,7 +8346,10 @@ async def user_info(
                 user_id=user_api_key_dict.user_id
             )
             # *NEW* get all teams in user 'teams' field
-            if getattr(caller_user_info, "user_role", None) == "proxy_admin":
+            if (
+                getattr(caller_user_info, "user_role", None)
+                == LitellmUserRoles.PROXY_ADMIN
+            ):
                 teams_2 = await prisma_client.get_data(
                     table_name="team",
                     query_type="find_all",
@@ -8716,7 +9177,7 @@ async def new_team(
 
     if (
         user_api_key_dict.user_role is None
-        or user_api_key_dict.user_role != "proxy_admin"
+        or user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN
     ):  # don't restrict proxy admin
         if (
             data.tpm_limit is not None
@@ -9322,7 +9783,7 @@ async def list_team(
     """
     global prisma_client
 
-    if user_api_key_dict.user_role != "proxy_admin":
+    if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
         raise HTTPException(
             status_code=401,
             detail={
@@ -9416,7 +9877,7 @@ async def new_organization(
 
     if (
         user_api_key_dict.user_role is None
-        or user_api_key_dict.user_role != "proxy_admin"
+        or user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN
     ):
         raise HTTPException(
             status_code=401,
@@ -9619,7 +10080,7 @@ async def budget_settings(
             detail={"error": CommonProxyErrors.db_not_connected_error.value},
         )
 
-    if user_api_key_dict.user_role != "proxy_admin":
+    if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
         raise HTTPException(
             status_code=400,
             detail={
@@ -9684,7 +10145,7 @@ async def list_budget(
             detail={"error": CommonProxyErrors.db_not_connected_error.value},
         )
 
-    if user_api_key_dict.user_role != "proxy_admin":
+    if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
         raise HTTPException(
             status_code=400,
             detail={
@@ -9718,7 +10179,7 @@ async def delete_budget(
             detail={"error": CommonProxyErrors.db_not_connected_error.value},
         )
 
-    if user_api_key_dict.user_role != "proxy_admin":
+    if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
         raise HTTPException(
             status_code=400,
             detail={
@@ -10375,7 +10836,7 @@ async def model_metrics_exceptions(
             SELECT 
                 CASE WHEN api_base = '' THEN litellm_model_name ELSE CONCAT(litellm_model_name, '-', api_base) END AS combined_model_api_base,
                 exception_type,
-                COUNT(*) AS num_exceptions
+                COUNT(*) AS num_rate_limit_exceptions
             FROM "LiteLLM_ErrorLogs"
             WHERE "startTime" >= $1::timestamp AND "endTime" <= $2::timestamp AND model_group = $3
             GROUP BY combined_model_api_base, exception_type
@@ -10383,7 +10844,7 @@ async def model_metrics_exceptions(
         SELECT 
             combined_model_api_base,
             COUNT(*) AS total_exceptions,
-            json_object_agg(exception_type, num_exceptions) AS exception_counts
+            json_object_agg(exception_type, num_rate_limit_exceptions) AS exception_counts
         FROM cte
         GROUP BY combined_model_api_base
         ORDER BY total_exceptions DESC
@@ -10696,7 +11157,7 @@ async def alerting_settings(
             detail={"error": CommonProxyErrors.db_not_connected_error.value},
         )
 
-    if user_api_key_dict.user_role != "proxy_admin":
+    if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
         raise HTTPException(
             status_code=400,
             detail={
@@ -10777,7 +11238,7 @@ async def alerting_settings(
 #             detail={"error": CommonProxyErrors.db_not_connected_error.value},
 #         )
 
-#     if user_api_key_dict.user_role != "proxy_admin":
+#     if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
 #         raise HTTPException(
 #             status_code=400,
 #             detail={"error": CommonProxyErrors.not_allowed_access.value},
@@ -11235,12 +11696,12 @@ async def login(request: Request):
         await user_update(
             data=UpdateUserRequest(
                 user_id=key_user_id,
-                user_role="proxy_admin",
+                user_role=LitellmUserRoles.PROXY_ADMIN,
             )
         )
         if os.getenv("DATABASE_URL") is not None:
             response = await generate_key_helper_fn(
-                **{"user_role": "proxy_admin", "duration": "2hr", "key_max_budget": 5, "models": [], "aliases": {}, "config": {}, "spend": 0, "user_id": key_user_id, "team_id": "litellm-dashboard"}  # type: ignore
+                **{"user_role": LitellmUserRoles.PROXY_ADMIN, "duration": "2hr", "key_max_budget": 5, "models": [], "aliases": {}, "config": {}, "spend": 0, "user_id": key_user_id, "team_id": "litellm-dashboard"}  # type: ignore
             )
         else:
             raise ProxyException(
@@ -11635,7 +12096,7 @@ async def new_invitation(
             detail={"error": CommonProxyErrors.db_not_connected_error.value},
         )
 
-    if user_api_key_dict.user_role != "proxy_admin":
+    if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
         raise HTTPException(
             status_code=400,
             detail={
@@ -11699,7 +12160,7 @@ async def invitation_info(
             detail={"error": CommonProxyErrors.db_not_connected_error.value},
         )
 
-    if user_api_key_dict.user_role != "proxy_admin":
+    if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
         raise HTTPException(
             status_code=400,
             detail={
@@ -11811,7 +12272,7 @@ async def invitation_delete(
             detail={"error": CommonProxyErrors.db_not_connected_error.value},
         )
 
-    if user_api_key_dict.user_role != "proxy_admin":
+    if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
         raise HTTPException(
             status_code=400,
             detail={
@@ -12006,7 +12467,7 @@ async def update_config_general_settings(
             detail={"error": CommonProxyErrors.db_not_connected_error.value},
         )
 
-    if user_api_key_dict.user_role != "proxy_admin":
+    if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
         raise HTTPException(
             status_code=400,
             detail={"error": CommonProxyErrors.not_allowed_access.value},
@@ -12080,7 +12541,7 @@ async def get_config_general_settings(
             detail={"error": CommonProxyErrors.db_not_connected_error.value},
         )
 
-    if user_api_key_dict.user_role != "proxy_admin":
+    if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
         raise HTTPException(
             status_code=400,
             detail={"error": CommonProxyErrors.not_allowed_access.value},
@@ -12143,7 +12604,7 @@ async def get_config_list(
             detail={"error": CommonProxyErrors.db_not_connected_error.value},
         )
 
-    if user_api_key_dict.user_role != "proxy_admin":
+    if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
         raise HTTPException(
             status_code=400,
             detail={
@@ -12218,7 +12679,7 @@ async def delete_config_general_settings(
             detail={"error": CommonProxyErrors.db_not_connected_error.value},
         )
 
-    if user_api_key_dict.user_role != "proxy_admin":
+    if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
         raise HTTPException(
             status_code=400,
             detail={

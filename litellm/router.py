@@ -103,7 +103,9 @@ class Router:
         allowed_fails: Optional[
             int
         ] = None,  # Number of times a deployment can failbefore being added to cooldown
-        cooldown_time: float = 1,  # (seconds) time to cooldown a deployment after failure
+        cooldown_time: Optional[
+            float
+        ] = None,  # (seconds) time to cooldown a deployment after failure
         routing_strategy: Literal[
             "simple-shuffle",
             "least-busy",
@@ -248,7 +250,7 @@ class Router:
             )  # initialize an empty list - to allow _add_deployment and delete_deployment to work
 
         self.allowed_fails = allowed_fails or litellm.allowed_fails
-        self.cooldown_time = cooldown_time or 1
+        self.cooldown_time = cooldown_time or 60
         self.failed_calls = (
             InMemoryCache()
         )  # cache to track failed call per deployment, if num failed calls within 1 minute > allowed fails, then add it to cooldown
@@ -1202,6 +1204,84 @@ class Router:
                 self.fail_calls[model_name] += 1
             raise e
 
+    async def aspeech(self, model: str, input: str, voice: str, **kwargs):
+        """
+        Example Usage:
+
+        ```
+        from litellm import Router
+        client = Router(model_list = [
+            {
+                "model_name": "tts",
+                "litellm_params": {
+                    "model": "tts-1",
+                },
+            },
+        ])
+
+        async with client.aspeech(
+            model="tts",
+            voice="alloy",
+            input="the quick brown fox jumped over the lazy dogs",
+            api_base=None,
+            api_key=None,
+            organization=None,
+            project=None,
+            max_retries=1,
+            timeout=600,
+            client=None,
+            optional_params={},
+        ) as response:
+            response.stream_to_file(speech_file_path)
+
+        ```
+        """
+        try:
+            kwargs["input"] = input
+            kwargs["voice"] = voice
+
+            deployment = await self.async_get_available_deployment(
+                model=model,
+                messages=[{"role": "user", "content": "prompt"}],
+                specific_deployment=kwargs.pop("specific_deployment", None),
+            )
+            kwargs.setdefault("metadata", {}).update(
+                {
+                    "deployment": deployment["litellm_params"]["model"],
+                    "model_info": deployment.get("model_info", {}),
+                }
+            )
+            kwargs["model_info"] = deployment.get("model_info", {})
+            data = deployment["litellm_params"].copy()
+            model_name = data["model"]
+            for k, v in self.default_litellm_params.items():
+                if (
+                    k not in kwargs
+                ):  # prioritize model-specific params > default router params
+                    kwargs[k] = v
+                elif k == "metadata":
+                    kwargs[k].update(v)
+
+            potential_model_client = self._get_client(
+                deployment=deployment, kwargs=kwargs, client_type="async"
+            )
+            # check if provided keys == client keys #
+            dynamic_api_key = kwargs.get("api_key", None)
+            if (
+                dynamic_api_key is not None
+                and potential_model_client is not None
+                and dynamic_api_key != potential_model_client.api_key
+            ):
+                model_client = None
+            else:
+                model_client = potential_model_client
+
+            response = await litellm.aspeech(**data, **kwargs)
+
+            return response
+        except Exception as e:
+            raise e
+
     async def amoderation(self, model: str, input: str, **kwargs):
         try:
             kwargs["model"] = model
@@ -1850,7 +1930,8 @@ class Router:
                     )
                     await asyncio.sleep(_timeout)
             try:
-                original_exception.message += f"\nNumber Retries = {current_attempt}"
+                cooldown_deployments = await self._async_get_cooldown_deployments()
+                original_exception.message += f"\nNumber Retries = {current_attempt + 1}, Max Retries={num_retries}\nCooldown Deployments={cooldown_deployments}"
             except:
                 pass
             raise original_exception
@@ -2143,7 +2224,7 @@ class Router:
                     )
                 )
 
-                if _time_to_cooldown < 0:
+                if _time_to_cooldown is None or _time_to_cooldown < 0:
                     # if the response headers did not read it -> set to default cooldown time
                     _time_to_cooldown = self.cooldown_time
 
@@ -2239,6 +2320,9 @@ class Router:
                 elif exception_status == 408:
                     return True
 
+                elif exception_status == 404:
+                    return True
+
                 else:
                     # Do NOT cool down all other 4XX Errors
                     return False
@@ -2264,6 +2348,7 @@ class Router:
 
         the exception is not one that should be immediately retried (e.g. 401)
         """
+        args = locals()
         if deployment is None:
             return
 
@@ -2296,7 +2381,6 @@ class Router:
                 )
                 exception_status = 500
         _should_retry = litellm._should_retry(status_code=exception_status)
-
         if updated_fails > self.allowed_fails or _should_retry == False:
             # get the current cooldown list for that minute
             cooldown_key = f"{current_minute}:cooldown_models"  # group cooldown models by minute to reduce number of redis calls
