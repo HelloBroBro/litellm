@@ -5,6 +5,7 @@ warnings.filterwarnings("ignore", message=".*conflict with protected namespace.*
 ### INIT VARIABLES ###
 import threading, requests, os
 from typing import Callable, List, Optional, Dict, Union, Any, Literal
+from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.caching import Cache
 from litellm._logging import (
     set_verbose,
@@ -102,6 +103,7 @@ common_cloud_provider_auth_params: dict = {
 use_client: bool = False
 ssl_verify: bool = True
 disable_streaming_logging: bool = False
+in_memory_llm_clients_cache: dict = {}
 ### GUARDRAILS ###
 llamaguard_model_name: Optional[str] = None
 openai_moderations_model_name: Optional[str] = None
@@ -212,6 +214,7 @@ add_function_to_prompt: bool = (
 )
 client_session: Optional[httpx.Client] = None
 aclient_session: Optional[httpx.AsyncClient] = None
+module_level_aclient = AsyncHTTPHandler()
 model_fallbacks: Optional[List] = None  # Deprecated for 'litellm.fallbacks'
 model_cost_map_url: str = (
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
