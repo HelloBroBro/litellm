@@ -1390,6 +1390,7 @@ def test_bedrock_claude_3_streaming():
     [
         "claude-3-opus-20240229",
         "cohere.command-r-plus-v1:0",  # bedrock
+        "gpt-3.5-turbo",
         "databricks/databricks-dbrx-instruct",  # databricks
         "predibase/llama-3-8b-instruct",  # predibase
         "replicate/meta/meta-llama-3-8b-instruct",  # replicate
@@ -1410,7 +1411,7 @@ async def test_parallel_streaming_requests(sync_mode, model):
         ]
 
         def sync_test_streaming():
-            response: litellm.CustomStreamWrapper = litellm.acompletion(  # type: ignore
+            response: litellm.CustomStreamWrapper = litellm.completion(  # type: ignore
                 model=model,
                 messages=messages,
                 stream=True,
@@ -2828,6 +2829,7 @@ async def test_azure_astreaming_and_function_calling():
         password=os.environ["REDIS_PASSWORD"],
     )
     try:
+        litellm.set_verbose = True
         response = await litellm.acompletion(
             model="azure/gpt-4-nov-release",
             tools=tools,

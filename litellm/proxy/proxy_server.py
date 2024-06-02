@@ -142,6 +142,7 @@ from litellm.proxy.auth.auth_checks import (
 from litellm.llms.custom_httpx.httpx_handler import HTTPHandler
 from litellm.exceptions import RejectedRequestError
 from litellm.integrations.slack_alerting import SlackAlertingArgs, SlackAlerting
+from litellm.scheduler import Scheduler, FlowItem, DefaultPriorities
 
 try:
     from litellm._version import version
@@ -196,6 +197,7 @@ ui_link = f"/ui/"
 ui_message = (
     f"👉 [```LiteLLM Admin Panel on /ui```]({ui_link}). Create, Edit Keys with SSO"
 )
+custom_swagger_message = f"[**Customize Swagger Docs**](https://docs.litellm.ai/docs/proxy/enterprise#swagger-docs---custom-routes--branding)"
 
 ### CUSTOM BRANDING [ENTERPRISE FEATURE] ###
 _docs_url = None if os.getenv("NO_DOCS", "False") == "True" else "/"
@@ -203,10 +205,10 @@ _title = os.getenv("DOCS_TITLE", "LiteLLM API") if premium_user else "LiteLLM AP
 _description = (
     os.getenv(
         "DOCS_DESCRIPTION",
-        f"Proxy Server to call 100+ LLMs in the OpenAI format\n\n{ui_message}",
+        f"Proxy Server to call 100+ LLMs in the OpenAI format. {custom_swagger_message}\n\n{ui_message}",
     )
     if premium_user
-    else f"Proxy Server to call 100+ LLMs in the OpenAI format\n\n{ui_message}"
+    else f"Proxy Server to call 100+ LLMs in the OpenAI format. {custom_swagger_message}\n\n{ui_message}"
 )
 
 app = FastAPI(
@@ -4049,6 +4051,7 @@ async def chat_completion(
         data["metadata"]["user_api_end_user_max_budget"] = getattr(
             user_api_key_dict, "end_user_max_budget", None
         )
+        data["metadata"]["litellm_api_version"] = version
 
         data["metadata"]["global_max_parallel_requests"] = general_settings.get(
             "global_max_parallel_requests", None
@@ -4362,6 +4365,7 @@ async def completion(
         data["metadata"]["user_api_key_alias"] = getattr(
             user_api_key_dict, "key_alias", None
         )
+        data["metadata"]["litellm_api_version"] = version
         data["metadata"]["user_api_key_user_id"] = user_api_key_dict.user_id
         data["metadata"]["user_api_key_team_id"] = getattr(
             user_api_key_dict, "team_id", None
@@ -4604,6 +4608,7 @@ async def embeddings(
             "authorization", None
         )  # do not store the original `sk-..` api key in the db
         data["metadata"]["headers"] = _headers
+        data["metadata"]["litellm_api_version"] = version
         data["metadata"]["user_api_key_alias"] = getattr(
             user_api_key_dict, "key_alias", None
         )
@@ -4808,6 +4813,7 @@ async def image_generation(
         if "metadata" not in data:
             data["metadata"] = {}
         data["metadata"]["user_api_key"] = user_api_key_dict.api_key
+        data["metadata"]["litellm_api_version"] = version
         data["metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
         _headers = dict(request.headers)
         _headers.pop(
@@ -4984,6 +4990,7 @@ async def audio_speech(
         if "metadata" not in data:
             data["metadata"] = {}
         data["metadata"]["user_api_key"] = user_api_key_dict.api_key
+        data["metadata"]["litellm_api_version"] = version
         data["metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
         _headers = dict(request.headers)
         _headers.pop(
@@ -5153,6 +5160,7 @@ async def audio_transcriptions(
         if "metadata" not in data:
             data["metadata"] = {}
         data["metadata"]["user_api_key"] = user_api_key_dict.api_key
+        data["metadata"]["litellm_api_version"] = version
         data["metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
         _headers = dict(request.headers)
         _headers.pop(
@@ -5329,6 +5337,11 @@ async def get_assistants(
     fastapi_response: Response,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
+    """
+    Returns a list of assistants.
+
+    API Reference docs - https://platform.openai.com/docs/api-reference/assistants/listAssistants
+    """
     global proxy_logging_obj
     data: Dict = {}
     try:
@@ -5351,6 +5364,7 @@ async def get_assistants(
             data["metadata"] = {}
         data["metadata"]["user_api_key"] = user_api_key_dict.api_key
         data["metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
+        data["metadata"]["litellm_api_version"] = version
         _headers = dict(request.headers)
         _headers.pop(
             "authorization", None
@@ -5455,6 +5469,11 @@ async def create_threads(
     fastapi_response: Response,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
+    """
+    Create a thread.
+
+    API Reference - https://platform.openai.com/docs/api-reference/threads/createThread
+    """
     global proxy_logging_obj
     data: Dict = {}
     try:
@@ -5476,6 +5495,7 @@ async def create_threads(
         if "litellm_metadata" not in data:
             data["litellm_metadata"] = {}
         data["litellm_metadata"]["user_api_key"] = user_api_key_dict.api_key
+        data["metadata"]["litellm_api_version"] = version
         data["litellm_metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
         _headers = dict(request.headers)
         _headers.pop(
@@ -5582,6 +5602,11 @@ async def get_thread(
     fastapi_response: Response,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
+    """
+    Retrieves a thread.
+
+    API Reference - https://platform.openai.com/docs/api-reference/threads/getThread
+    """
     global proxy_logging_obj
     data: Dict = {}
     try:
@@ -5606,6 +5631,7 @@ async def get_thread(
             "authorization", None
         )  # do not store the original `sk-..` api key in the db
         data["metadata"]["headers"] = _headers
+        data["metadata"]["litellm_api_version"] = version
         data["metadata"]["user_api_key_alias"] = getattr(
             user_api_key_dict, "key_alias", None
         )
@@ -5706,6 +5732,11 @@ async def add_messages(
     fastapi_response: Response,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
+    """
+    Create a message.
+
+    API Reference - https://platform.openai.com/docs/api-reference/messages/createMessage
+    """
     global proxy_logging_obj
     data: Dict = {}
     try:
@@ -5727,6 +5758,7 @@ async def add_messages(
         if "litellm_metadata" not in data:
             data["litellm_metadata"] = {}
         data["litellm_metadata"]["user_api_key"] = user_api_key_dict.api_key
+        data["litellm_metadata"]["litellm_api_version"] = version
         data["litellm_metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
         _headers = dict(request.headers)
         _headers.pop(
@@ -5833,6 +5865,11 @@ async def get_messages(
     fastapi_response: Response,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
+    """
+    Returns a list of messages for a given thread.
+
+    API Reference - https://platform.openai.com/docs/api-reference/messages/listMessages
+    """
     global proxy_logging_obj
     data: Dict = {}
     try:
@@ -5856,6 +5893,7 @@ async def get_messages(
             "authorization", None
         )  # do not store the original `sk-..` api key in the db
         data["metadata"]["headers"] = _headers
+        data["metadata"]["litellm_api_version"] = version
         data["metadata"]["user_api_key_alias"] = getattr(
             user_api_key_dict, "key_alias", None
         )
@@ -5956,6 +5994,11 @@ async def run_thread(
     fastapi_response: Response,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
+    """
+    Create a run.
+
+    API Reference: https://platform.openai.com/docs/api-reference/runs/createRun
+    """
     global proxy_logging_obj
     data: Dict = {}
     try:
@@ -5975,6 +6018,7 @@ async def run_thread(
         if "litellm_metadata" not in data:
             data["litellm_metadata"] = {}
         data["litellm_metadata"]["user_api_key"] = user_api_key_dict.api_key
+        data["litellm_metadata"]["litellm_api_version"] = version
         data["litellm_metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
         _headers = dict(request.headers)
         _headers.pop(
@@ -6124,6 +6168,7 @@ async def create_batch(
         if "metadata" not in data:
             data["metadata"] = {}
         data["metadata"]["user_api_key"] = user_api_key_dict.api_key
+        data["metadata"]["litellm_api_version"] = version
         data["metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
         _headers = dict(request.headers)
         _headers.pop(
@@ -6264,6 +6309,7 @@ async def retrieve_batch(
         if "metadata" not in data:
             data["metadata"] = {}
         data["metadata"]["user_api_key"] = user_api_key_dict.api_key
+        data["metadata"]["litellm_api_version"] = version
         data["metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
         _headers = dict(request.headers)
         _headers.pop(
@@ -6418,6 +6464,7 @@ async def create_file(
         if "metadata" not in data:
             data["metadata"] = {}
         data["metadata"]["user_api_key"] = user_api_key_dict.api_key
+        data["metadata"]["litellm_api_version"] = version
         data["metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
         _headers = dict(request.headers)
         _headers.pop(
@@ -6563,6 +6610,7 @@ async def moderations(
         if "metadata" not in data:
             data["metadata"] = {}
         data["metadata"]["user_api_key"] = user_api_key_dict.api_key
+        data["metadata"]["litellm_api_version"] = version
         data["metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
         _headers = dict(request.headers)
         _headers.pop(
@@ -8655,17 +8703,13 @@ async def global_spend_logs(
 
         return response
     else:
-        sql_query = (
-            """
+        sql_query = """
             SELECT * FROM "MonthlyGlobalSpendPerKey"
-            WHERE "api_key" = '"""
-            + api_key
-            + """'
+            WHERE "api_key" = $1
             ORDER BY "date";
-        """
-        )
+            """
 
-        response = await prisma_client.db.query_raw(query=sql_query)
+        response = await prisma_client.db.query_raw(sql_query, api_key)
 
         return response
     return
@@ -12075,118 +12119,7 @@ async def alerting_settings(
     return return_val
 
 
-# @router.post(
-#     "/alerting/update",
-#     description="Update the slack alerting settings. Persist value in db.",
-#     tags=["alerting"],
-#     dependencies=[Depends(user_api_key_auth)],
-#     include_in_schema=False,
-# )
-# async def alerting_update(
-#     data: SlackAlertingArgs,
-#     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
-# ):
-#     """Allows updating slack alerting values. Used by UI."""
-#     global prisma_client
-#     if prisma_client is None:
-#         raise HTTPException(
-#             status_code=400,
-#             detail={"error": CommonProxyErrors.db_not_connected_error.value},
-#         )
-
-#     if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
-#         raise HTTPException(
-#             status_code=400,
-#             detail={"error": CommonProxyErrors.not_allowed_access.value},
-#         )
-
-#     ## get general settings from db
-#     db_general_settings = await prisma_client.db.litellm_config.find_first(
-#         where={"param_name": "general_settings"}
-#     )
-#     ### update value
-
-#     alerting_args_dict = {}
-#     if db_general_settings is None or db_general_settings.param_value is None:
-#         general_settings = {}
-#         alerting_args_dict = {}
-#     else:
-#         general_settings = dict(db_general_settings.param_value)
-#         _alerting_args_dict = general_settings.get("alerting_args", None)
-#         if _alerting_args_dict is not None and isinstance(_alerting_args_dict, dict):
-#             alerting_args_dict = _alerting_args_dict
-
-
-#     alerting_args_dict = data.model
-
-#     response = await prisma_client.db.litellm_config.upsert(
-#         where={"param_name": "general_settings"},
-#         data={
-#             "create": {"param_name": "general_settings", "param_value": json.dumps(general_settings)},  # type: ignore
-#             "update": {"param_value": json.dumps(general_settings)},  # type: ignore
-#         },
-#     )
-
-#     return response
-
-
 #### EXPERIMENTAL QUEUING ####
-async def _litellm_chat_completions_worker(data, user_api_key_dict):
-    """
-    worker to make litellm completions calls
-    """
-    while True:
-        try:
-            ### CALL HOOKS ### - modify incoming data before calling the model
-            data = await proxy_logging_obj.pre_call_hook(
-                user_api_key_dict=user_api_key_dict, data=data, call_type="completion"
-            )
-
-            verbose_proxy_logger.debug("_litellm_chat_completions_worker started")
-            ### ROUTE THE REQUEST ###
-            router_model_names = (
-                [m["model_name"] for m in llm_model_list]
-                if llm_model_list is not None
-                else []
-            )
-            if (
-                llm_router is not None and data["model"] in router_model_names
-            ):  # model in router model list
-                response = await llm_router.acompletion(**data)
-            elif (
-                llm_router is not None and data["model"] in llm_router.deployment_names
-            ):  # model in router deployments, calling a specific deployment on the router
-                response = await llm_router.acompletion(
-                    **data, specific_deployment=True
-                )
-            elif (
-                llm_router is not None
-                and llm_router.model_group_alias is not None
-                and data["model"] in llm_router.model_group_alias
-            ):  # model set in model_group_alias
-                response = await llm_router.acompletion(**data)
-            else:  # router is not set
-                response = await litellm.acompletion(**data)
-
-            verbose_proxy_logger.debug("final response: {response}")
-            return response
-        except HTTPException as e:
-            verbose_proxy_logger.debug(
-                f"EXCEPTION RAISED IN _litellm_chat_completions_worker - {e.status_code}; {e.detail}"
-            )
-            if (
-                e.status_code == 429
-                and "Max parallel request limit reached" in e.detail
-            ):
-                verbose_proxy_logger.debug("Max parallel request limit reached!")
-                timeout = litellm._calculate_retry_after(
-                    remaining_retries=3, max_retries=3, min_timeout=1
-                )
-                await asyncio.sleep(timeout)
-            else:
-                raise e
-
-
 @router.post(
     "/queue/chat/completions",
     tags=["experimental"],
@@ -12194,6 +12127,7 @@ async def _litellm_chat_completions_worker(data, user_api_key_dict):
 )
 async def async_queue_request(
     request: Request,
+    fastapi_response: Response,
     model: Optional[str] = None,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
@@ -12259,12 +12193,12 @@ async def async_queue_request(
         if user_api_base:
             data["api_base"] = user_api_base
 
-        response = await asyncio.wait_for(
-            _litellm_chat_completions_worker(
-                data=data, user_api_key_dict=user_api_key_dict
-            ),
-            timeout=litellm.request_timeout,
-        )
+        if llm_router is None:
+            raise HTTPException(
+                status_code=500, detail={"error": CommonProxyErrors.no_llm_router.value}
+            )
+
+        response = await llm_router.schedule_acompletion(**data)
 
         if (
             "stream" in data and data["stream"] == True
@@ -12278,6 +12212,7 @@ async def async_queue_request(
                 media_type="text/event-stream",
             )
 
+        fastapi_response.headers.update({"x-litellm-priority": str(data["priority"])})
         return response
     except Exception as e:
         await proxy_logging_obj.post_call_failure_hook(
