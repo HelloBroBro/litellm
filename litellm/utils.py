@@ -1305,6 +1305,13 @@ class Logging:
                 )
             else:
                 verbose_logger.info(f"\033[92m{curl_command}\033[0m\n")
+
+            # check if user wants the raw request logged to their logging provider (like LangFuse)
+            _litellm_params = self.model_call_details.get("litellm_params", {})
+            _metadata = _litellm_params.get("metadata", {}) or {}
+            if _metadata.get("log_raw_request", False) is True:
+                _metadata["raw_request"] = curl_command
+
             if self.logger_fn and callable(self.logger_fn):
                 try:
                     self.logger_fn(
@@ -6062,9 +6069,9 @@ def get_optional_params(
             model=model,
             api_version=api_version,  # type: ignore
         )
-    else:  # assume passing in params for azure openai
+    else:  # assume passing in params for text-completion openai
         supported_params = get_supported_openai_params(
-            model=model, custom_llm_provider="azure"
+            model=model, custom_llm_provider="custom_openai"
         )
         _check_valid_arg(supported_params=supported_params)
         if functions is not None:
@@ -6614,7 +6621,30 @@ def get_supported_openai_params(
         ]
     elif custom_llm_provider == "watsonx":
         return litellm.IBMWatsonXAIConfig().get_supported_openai_params()
-
+    elif custom_llm_provider == "custom_openai" or "text-completion-openai":
+        return [
+            "functions",
+            "function_call",
+            "temperature",
+            "top_p",
+            "n",
+            "stream",
+            "stream_options",
+            "stop",
+            "max_tokens",
+            "presence_penalty",
+            "frequency_penalty",
+            "logit_bias",
+            "user",
+            "response_format",
+            "seed",
+            "tools",
+            "tool_choice",
+            "max_retries",
+            "logprobs",
+            "top_logprobs",
+            "extra_headers",
+        ]
     return None
 
 
@@ -11911,11 +11941,23 @@ class CustomStreamWrapper:
                     )
                 )
                 return processed_chunk
+        except httpx.TimeoutException as e:  # if httpx read timeout error occues
+            traceback_exception = traceback.format_exc()
+            ## ADD DEBUG INFORMATION - E.G. LITELLM REQUEST TIMEOUT
+            traceback_exception += "\nLiteLLM Default Request Timeout - {}".format(
+                litellm.request_timeout
+            )
+            if self.logging_obj is not None:
+                # Handle any exceptions that might occur during streaming
+                asyncio.create_task(
+                    self.logging_obj.async_failure_handler(e, traceback_exception)
+                )
+            raise e
         except Exception as e:
             traceback_exception = traceback.format_exc()
             # Handle any exceptions that might occur during streaming
             asyncio.create_task(
-                self.logging_obj.async_failure_handler(e, traceback_exception)
+                self.logging_obj.async_failure_handler(e, traceback_exception)  # type: ignore
             )
             raise e
 
