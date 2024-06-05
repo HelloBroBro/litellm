@@ -680,12 +680,6 @@ class ModelResponse(OpenAIObject):
                 usage = usage
         elif stream is None or stream == False:
             usage = Usage()
-        elif (
-            stream == True
-            and stream_options is not None
-            and stream_options.get("include_usage") == True
-        ):
-            usage = Usage()
         if hidden_params:
             self._hidden_params = hidden_params
 
@@ -1143,6 +1137,7 @@ class Logging:
     global supabaseClient, liteDebuggerClient, promptLayerLogger, weightsBiasesLogger, langsmithLogger, logfireLogger, capture_exception, add_breadcrumb, lunaryLogger
 
     custom_pricing: bool = False
+    stream_options = None
 
     def __init__(
         self,
@@ -1211,6 +1206,7 @@ class Logging:
         self.litellm_params = litellm_params
         self.logger_fn = litellm_params.get("logger_fn", None)
         print_verbose(f"self.optional_params: {self.optional_params}")
+
         self.model_call_details = {
             "model": self.model,
             "messages": self.messages,
@@ -1226,6 +1222,9 @@ class Logging:
             **additional_params,
         }
 
+        ## check if stream options is set ##  - used by CustomStreamWrapper for easy instrumentation
+        if "stream_options" in additional_params:
+            self.stream_options = additional_params["stream_options"]
         ## check if custom pricing set ##
         if (
             litellm_params.get("input_cost_per_token") is not None
@@ -1270,7 +1269,11 @@ class Logging:
                 api_base
             )  # used for alerting
             masked_headers = {
-                k: (v[:-20] + "*" * 20) if (isinstance(v, str) and len(v) > 20) else v
+                k: (
+                    (v[:-44] + "*" * 44)
+                    if (isinstance(v, str) and len(v) > 44)
+                    else "*****"
+                )
                 for k, v in headers.items()
             }
             formatted_headers = " ".join(
@@ -1307,10 +1310,13 @@ class Logging:
                 verbose_logger.info(f"\033[92m{curl_command}\033[0m\n")
 
             # check if user wants the raw request logged to their logging provider (like LangFuse)
-            _litellm_params = self.model_call_details.get("litellm_params", {})
-            _metadata = _litellm_params.get("metadata", {}) or {}
-            if _metadata.get("log_raw_request", False) is True:
-                _metadata["raw_request"] = curl_command
+            try:
+                # [Non-blocking Extra Debug Information in metadata]
+                _litellm_params = self.model_call_details.get("litellm_params", {})
+                _metadata = _litellm_params.get("metadata", {}) or {}
+                _metadata["raw_request"] = str(curl_command)
+            except:
+                pass
 
             if self.logger_fn and callable(self.logger_fn):
                 try:
@@ -1499,51 +1505,21 @@ class Logging:
                 )
                 and self.stream != True
             ):  # handle streaming separately
-                try:
-                    if self.model_call_details.get("cache_hit", False) == True:
-                        self.model_call_details["response_cost"] = 0.0
-                    else:
-                        result._hidden_params["optional_params"] = self.optional_params
-                        if (
-                            self.call_type == CallTypes.aimage_generation.value
-                            or self.call_type == CallTypes.image_generation.value
-                        ):
-                            self.model_call_details["response_cost"] = (
-                                litellm.completion_cost(
-                                    completion_response=result,
-                                    model=self.model,
-                                    call_type=self.call_type,
-                                    custom_llm_provider=self.model_call_details.get(
-                                        "custom_llm_provider", None
-                                    ),  # set for img gen models
-                                )
-                            )
-                        else:
-                            base_model: Optional[str] = None
-                            # check if base_model set on azure
-                            base_model = _get_base_model_from_metadata(
-                                model_call_details=self.model_call_details
-                            )
-                            # litellm model name
-                            litellm_model = self.model_call_details["model"]
-                            if (
-                                litellm_model in litellm.model_cost
-                                and self.custom_pricing == True
-                            ):
-                                base_model = litellm_model
-                            # base_model defaults to None if not set on model_info
-                            self.model_call_details["response_cost"] = (
-                                litellm.completion_cost(
-                                    completion_response=result,
-                                    call_type=self.call_type,
-                                    model=base_model,
-                                )
-                            )
-                except litellm.NotFoundError as e:
-                    verbose_logger.debug(
-                        f"Model={self.model} not found in completion cost map."
+                self.model_call_details["response_cost"] = (
+                    litellm.response_cost_calculator(
+                        response_object=result,
+                        model=self.model,
+                        cache_hit=self.model_call_details.get("cache_hit", False),
+                        custom_llm_provider=self.model_call_details.get(
+                            "custom_llm_provider", None
+                        ),
+                        base_model=_get_base_model_from_metadata(
+                            model_call_details=self.model_call_details
+                        ),
+                        call_type=self.call_type,
+                        optional_params=self.optional_params,
                     )
-                    self.model_call_details["response_cost"] = None
+                )
             else:  # streaming chunks + image gen.
                 self.model_call_details["response_cost"] = None
 
@@ -1607,29 +1583,21 @@ class Logging:
                 self.model_call_details["complete_streaming_response"] = (
                     complete_streaming_response
                 )
-                try:
-                    if self.model_call_details.get("cache_hit", False) == True:
-                        self.model_call_details["response_cost"] = 0.0
-                    else:
-                        # check if base_model set on azure
-                        base_model = _get_base_model_from_metadata(
+                self.model_call_details["response_cost"] = (
+                    litellm.response_cost_calculator(
+                        response_object=complete_streaming_response,
+                        model=self.model,
+                        cache_hit=self.model_call_details.get("cache_hit", False),
+                        custom_llm_provider=self.model_call_details.get(
+                            "custom_llm_provider", None
+                        ),
+                        base_model=_get_base_model_from_metadata(
                             model_call_details=self.model_call_details
-                        )
-                        # base_model defaults to None if not set on model_info
-                        self.model_call_details["response_cost"] = (
-                            litellm.completion_cost(
-                                completion_response=complete_streaming_response,
-                                model=base_model,
-                            )
-                        )
-                    verbose_logger.debug(
-                        f"Model={self.model}; cost={self.model_call_details['response_cost']}"
+                        ),
+                        call_type=self.call_type,
+                        optional_params=self.optional_params,
                     )
-                except litellm.NotFoundError as e:
-                    verbose_logger.debug(
-                        f"Model={self.model} not found in completion cost map."
-                    )
-                    self.model_call_details["response_cost"] = None
+                )
             if self.dynamic_success_callbacks is not None and isinstance(
                 self.dynamic_success_callbacks, list
             ):
@@ -3041,6 +3009,7 @@ def function_setup(
             user="",
             optional_params={},
             litellm_params=litellm_params,
+            stream_options=kwargs.get("stream_options", None),
         )
         return logging_obj, kwargs
     except Exception as e:
@@ -4576,16 +4545,20 @@ def completion_cost(
     completion="",
     total_time=0.0,  # used for replicate, sagemaker
     call_type: Literal[
-        "completion",
-        "acompletion",
         "embedding",
         "aembedding",
+        "completion",
+        "acompletion",
         "atext_completion",
         "text_completion",
         "image_generation",
         "aimage_generation",
-        "transcription",
+        "moderation",
+        "amoderation",
         "atranscription",
+        "transcription",
+        "aspeech",
+        "speech",
     ] = "completion",
     ### REGION ###
     custom_llm_provider=None,
@@ -5351,7 +5324,7 @@ def get_optional_params(
         unsupported_params = {}
         for k in non_default_params.keys():
             if k not in supported_params:
-                if k == "user":
+                if k == "user" or k == "stream_options":
                     continue
                 if k == "n" and n == 1:  # langchain sends n=1 as a default value
                     continue  # skip this param
@@ -5491,7 +5464,7 @@ def get_optional_params(
             optional_params["top_p"] = top_p
         if stop is not None:
             optional_params["stop_sequences"] = stop
-    elif custom_llm_provider == "huggingface":
+    elif custom_llm_provider == "huggingface" or custom_llm_provider == "predibase":
         ## check if unsupported param passed in
         supported_params = get_supported_openai_params(
             model=model, custom_llm_provider=custom_llm_provider
@@ -5946,7 +5919,6 @@ def get_optional_params(
             optional_params["logprobs"] = logprobs
         if top_logprobs is not None:
             optional_params["top_logprobs"] = top_logprobs
-
     elif custom_llm_provider == "openrouter":
         supported_params = get_supported_openai_params(
             model=model, custom_llm_provider=custom_llm_provider
@@ -9838,15 +9810,19 @@ def exception_type(
                         response=original_exception.response,
                     )
                 elif (
-                    "invalid_request_error" in error_str
-                    and "content_policy_violation" in error_str
-                ) or (
-                    "The response was filtered due to the prompt triggering Azure OpenAI's content management"
-                    in error_str
+                    (
+                        "invalid_request_error" in error_str
+                        and "content_policy_violation" in error_str
+                    )
+                    or (
+                        "The response was filtered due to the prompt triggering Azure OpenAI's content management"
+                        in error_str
+                    )
+                    or "Your task failed as a result of our safety system" in error_str
                 ):
                     exception_mapping_worked = True
                     raise ContentPolicyViolationError(
-                        message=f"AzureException ContentPolicyViolationError - {original_exception.message}",
+                        message=f"litellm.ContentPolicyViolationError: AzureException - {original_exception.message}",
                         llm_provider="azure",
                         model=model,
                         litellm_debug_info=extra_information,
@@ -10276,7 +10252,14 @@ class CustomStreamWrapper:
         self.response_id = None
         self.logging_loop = None
         self.rules = Rules()
-        self.stream_options = stream_options
+        self.stream_options = stream_options or getattr(
+            logging_obj, "stream_options", None
+        )
+        self.messages = getattr(logging_obj, "messages", None)
+        self.sent_stream_usage = False
+        self.chunks: List = (
+            []
+        )  # keep track of the returned chunks - used for calculating the input/output tokens for stream options
 
     def __iter__(self):
         return self
@@ -11092,8 +11075,16 @@ class CustomStreamWrapper:
             return ""
 
     def model_response_creator(self):
+        _model = self.model
+        _received_llm_provider = self.custom_llm_provider
+        _logging_obj_llm_provider = self.logging_obj.model_call_details.get("custom_llm_provider", None)  # type: ignore
+        if (
+            _received_llm_provider == "openai"
+            and _received_llm_provider != _logging_obj_llm_provider
+        ):
+            _model = "{}/{}".format(_logging_obj_llm_provider, _model)
         model_response = ModelResponse(
-            stream=True, model=self.model, stream_options=self.stream_options
+            stream=True, model=_model, stream_options=self.stream_options
         )
         if self.response_id is not None:
             model_response.id = self.response_id
@@ -11101,10 +11092,9 @@ class CustomStreamWrapper:
             self.response_id = model_response.id
         if self.system_fingerprint is not None:
             model_response.system_fingerprint = self.system_fingerprint
-        model_response._hidden_params["custom_llm_provider"] = self.custom_llm_provider
+        model_response._hidden_params["custom_llm_provider"] = _logging_obj_llm_provider
         model_response._hidden_params["created_at"] = time.time()
-        model_response.choices = [StreamingChoices()]
-        model_response.choices[0].finish_reason = None
+        model_response.choices = [StreamingChoices(finish_reason=None)]
         return model_response
 
     def is_delta_empty(self, delta: Delta) -> bool:
@@ -11390,8 +11380,14 @@ class CustomStreamWrapper:
                 if (
                     self.stream_options
                     and self.stream_options.get("include_usage", False) == True
+                    and response_obj["usage"] is not None
                 ):
-                    model_response.usage = response_obj["usage"]
+                    self.sent_stream_usage = True
+                    model_response.usage = litellm.Usage(
+                        prompt_tokens=response_obj["usage"].prompt_tokens,
+                        completion_tokens=response_obj["usage"].completion_tokens,
+                        total_tokens=response_obj["usage"].total_tokens,
+                    )
             elif self.custom_llm_provider == "databricks":
                 response_obj = litellm.DatabricksConfig()._chunk_parser(chunk)
                 completion_obj["content"] = response_obj["text"]
@@ -11401,8 +11397,14 @@ class CustomStreamWrapper:
                 if (
                     self.stream_options
                     and self.stream_options.get("include_usage", False) == True
+                    and response_obj["usage"] is not None
                 ):
-                    model_response.usage = response_obj["usage"]
+                    self.sent_stream_usage = True
+                    model_response.usage = litellm.Usage(
+                        prompt_tokens=response_obj["usage"].prompt_tokens,
+                        completion_tokens=response_obj["usage"].completion_tokens,
+                        total_tokens=response_obj["usage"].total_tokens,
+                    )
             elif self.custom_llm_provider == "azure_text":
                 response_obj = self.handle_azure_text_completion_chunk(chunk)
                 completion_obj["content"] = response_obj["text"]
@@ -11459,8 +11461,14 @@ class CustomStreamWrapper:
                 if (
                     self.stream_options is not None
                     and self.stream_options["include_usage"] == True
+                    and response_obj["usage"] is not None
                 ):
-                    model_response.usage = response_obj["usage"]
+                    self.sent_stream_usage = True
+                    model_response.usage = litellm.Usage(
+                        prompt_tokens=response_obj["usage"].prompt_tokens,
+                        completion_tokens=response_obj["usage"].completion_tokens,
+                        total_tokens=response_obj["usage"].total_tokens,
+                    )
 
             model_response.model = self.model
             print_verbose(
@@ -11737,7 +11745,6 @@ class CustomStreamWrapper:
             model_response.choices[0].finish_reason = "stop"
         return model_response
 
-    ## needs to handle the empty string case (even starting chunk can be an empty string)
     def __next__(self):
         try:
             while True:
@@ -11769,9 +11776,27 @@ class CustomStreamWrapper:
                         input=self.response_uptil_now, model=self.model
                     )
                     # RETURN RESULT
+                    self.chunks.append(response)
                     return response
         except StopIteration:
             if self.sent_last_chunk == True:
+                if (
+                    self.sent_stream_usage == False
+                    and self.stream_options is not None
+                    and self.stream_options.get("include_usage", False) == True
+                ):
+                    # send the final chunk with stream options
+                    complete_streaming_response = litellm.stream_chunk_builder(
+                        chunks=self.chunks, messages=self.messages
+                    )
+                    response = self.model_response_creator()
+                    response.usage = complete_streaming_response.usage  # type: ignore
+                    ## LOGGING
+                    threading.Thread(
+                        target=self.logging_obj.success_handler, args=(response,)
+                    ).start()  # log response
+                    self.sent_stream_usage = True
+                    return response
                 raise  # Re-raise StopIteration
             else:
                 self.sent_last_chunk = True
@@ -11869,6 +11894,7 @@ class CustomStreamWrapper:
                         input=self.response_uptil_now, model=self.model
                     )
                     print_verbose(f"final returned processed chunk: {processed_chunk}")
+                    self.chunks.append(processed_chunk)
                     return processed_chunk
                 raise StopAsyncIteration
             else:  # temporary patch for non-aiohttp async calls
@@ -11908,9 +11934,32 @@ class CustomStreamWrapper:
                             input=self.response_uptil_now, model=self.model
                         )
                         # RETURN RESULT
+                        self.chunks.append(processed_chunk)
                         return processed_chunk
         except StopAsyncIteration:
             if self.sent_last_chunk == True:
+                if (
+                    self.sent_stream_usage == False
+                    and self.stream_options is not None
+                    and self.stream_options.get("include_usage", False) == True
+                ):
+                    # send the final chunk with stream options
+                    complete_streaming_response = litellm.stream_chunk_builder(
+                        chunks=self.chunks, messages=self.messages
+                    )
+                    response = self.model_response_creator()
+                    response.usage = complete_streaming_response.usage
+                    ## LOGGING
+                    threading.Thread(
+                        target=self.logging_obj.success_handler, args=(response,)
+                    ).start()  # log response
+                    asyncio.create_task(
+                        self.logging_obj.async_success_handler(
+                            response,
+                        )
+                    )
+                    self.sent_stream_usage = True
+                    return response
                 raise  # Re-raise StopIteration
             else:
                 self.sent_last_chunk = True
