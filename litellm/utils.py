@@ -4060,6 +4060,7 @@ def openai_token_counter(
                     for c in value:
                         if c["type"] == "text":
                             text += c["text"]
+                            num_tokens += len(encoding.encode(c["text"], disallowed_special=()))
                         elif c["type"] == "image_url":
                             if isinstance(c["image_url"], dict):
                                 image_url_dict = c["image_url"]
@@ -6196,6 +6197,27 @@ def calculate_max_parallel_requests(
     return None
 
 
+def _get_order_filtered_deployments(healthy_deployments: List[Dict]) -> List:
+    min_order = min(
+        (
+            deployment["litellm_params"]["order"]
+            for deployment in healthy_deployments
+            if "order" in deployment["litellm_params"]
+        ),
+        default=None,
+    )
+
+    if min_order is not None:
+        filtered_deployments = [
+            deployment
+            for deployment in healthy_deployments
+            if deployment["litellm_params"].get("order") == min_order
+        ]
+
+        return filtered_deployments
+    return healthy_deployments
+
+
 def _get_model_region(
     custom_llm_provider: str, litellm_params: LiteLLM_Params
 ) -> Optional[str]:
@@ -7351,6 +7373,10 @@ def get_provider_fields(custom_llm_provider: str) -> List[ProviderField]:
 
     if custom_llm_provider == "databricks":
         return litellm.DatabricksConfig().get_required_params()
+    
+    elif custom_llm_provider == "ollama":
+        return litellm.OllamaConfig().get_required_params()
+    
     else:
         return []
 
