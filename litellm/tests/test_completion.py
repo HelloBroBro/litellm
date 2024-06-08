@@ -300,7 +300,11 @@ def test_completion_claude_3():
         pytest.fail(f"Error occurred: {e}")
 
 
-def test_completion_claude_3_function_call():
+@pytest.mark.parametrize(
+    "model",
+    ["anthropic/claude-3-opus-20240229", "anthropic.claude-3-sonnet-20240229-v1:0"],
+)
+def test_completion_claude_3_function_call(model):
     litellm.set_verbose = True
     tools = [
         {
@@ -331,13 +335,14 @@ def test_completion_claude_3_function_call():
     try:
         # test without max tokens
         response = completion(
-            model="anthropic/claude-3-opus-20240229",
+            model=model,
             messages=messages,
             tools=tools,
             tool_choice={
                 "type": "function",
                 "function": {"name": "get_current_weather"},
             },
+            drop_params=True,
         )
 
         # Add any assertions, here to check response args
@@ -364,10 +369,11 @@ def test_completion_claude_3_function_call():
         )
         # In the second response, Claude should deduce answer from tool results
         second_response = completion(
-            model="anthropic/claude-3-opus-20240229",
+            model=model,
             messages=messages,
             tools=tools,
             tool_choice="auto",
+            drop_params=True,
         )
         print(second_response)
     except Exception as e:
@@ -1398,7 +1404,6 @@ def test_hf_test_completion_tgi():
 
 
 def mock_post(url, data=None, json=None, headers=None):
-
     print(f"url={url}")
     if "text-classification" in url:
         raise Exception("Model not found")
@@ -2163,6 +2168,7 @@ def test_completion_azure_key_completion_arg():
             logprobs=True,
             max_tokens=10,
         )
+
         print(f"response: {response}")
 
         print("Hidden Params", response._hidden_params)
@@ -2240,9 +2246,6 @@ def test_re_use_openaiClient():
         pytest.fail("got Exception", e)
 
 
-# test_re_use_openaiClient()
-
-
 def test_completion_azure():
     try:
         print("azure gpt-3.5 test\n\n")
@@ -2254,7 +2257,7 @@ def test_completion_azure():
             api_key="os.environ/AZURE_API_KEY",
         )
         print(f"response: {response}")
-        ## Test azure flag for backwards compat
+        ## Test azure flag for backwards-compat
         # response = completion(
         #     model="chatgpt-v-2",
         #     messages=messages,
@@ -2538,6 +2541,7 @@ def test_replicate_custom_prompt_dict():
                     "content": "what is yc write 1 paragraph",
                 }
             ],
+            mock_response="Hello world",
             repetition_penalty=0.1,
             num_retries=3,
         )
