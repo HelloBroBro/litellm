@@ -272,7 +272,7 @@ def test_call_with_invalid_key(prisma_client):
     except Exception as e:
         print("Got Exception", e)
         print(e.message)
-        assert "Authentication Error, Invalid token passed" in e.message
+        assert "Authentication Error, Invalid proxy server token passed" in e.message
         pass
 
 
@@ -1175,7 +1175,6 @@ def test_generate_and_update_key(prisma_client):
         asyncio.run(test())
     except Exception as e:
         print("Got Exception", e)
-        print(e.message)
         pytest.fail(f"An exception occurred - {str(e)}")
 
 
