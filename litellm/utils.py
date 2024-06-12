@@ -30,7 +30,7 @@ from dataclasses import (
     dataclass,
     field,
 )
-
+import os
 import litellm._service_logger  # for storing API inputs, outputs, and metadata
 from litellm.llms.custom_httpx.http_handler import HTTPHandler, AsyncHTTPHandler
 from litellm.caching import DualCache
@@ -49,9 +49,9 @@ except (ImportError, AttributeError):
 
     filename = pkg_resources.resource_filename(__name__, "llms/tokenizers")
 
-os.environ["TIKTOKEN_CACHE_DIR"] = (
-    filename  # use local copy of tiktoken b/c of - https://github.com/BerriAI/litellm/issues/1071
-)
+os.environ["TIKTOKEN_CACHE_DIR"] = os.getenv(
+    "CUSTOM_TIKTOKEN_CACHE_DIR", filename
+)  # use local copy of tiktoken b/c of - https://github.com/BerriAI/litellm/issues/1071
 
 encoding = tiktoken.get_encoding("cl100k_base")
 from importlib import resources
@@ -938,7 +938,6 @@ class TextCompletionResponse(OpenAIObject):
         object=None,
         **params,
     ):
-
         if stream:
             object = "text_completion.chunk"
             choices = [TextChoices()]
@@ -947,7 +946,6 @@ class TextCompletionResponse(OpenAIObject):
             if choices is not None and isinstance(choices, list):
                 new_choices = []
                 for choice in choices:
-
                     if isinstance(choice, TextChoices):
                         _new_choice = choice
                     elif isinstance(choice, dict):
@@ -1023,7 +1021,6 @@ class ImageObject(OpenAIObject):
     revised_prompt: Optional[str] = None
 
     def __init__(self, b64_json=None, url=None, revised_prompt=None):
-
         super().__init__(b64_json=b64_json, url=url, revised_prompt=revised_prompt)
 
     def __contains__(self, key):
@@ -1347,28 +1344,29 @@ class Logging:
                 )
             else:
                 verbose_logger.debug(f"\033[92m{curl_command}\033[0m\n")
-            # log raw request to provider (like LangFuse)
-            try:
-                # [Non-blocking Extra Debug Information in metadata]
-                _litellm_params = self.model_call_details.get("litellm_params", {})
-                _metadata = _litellm_params.get("metadata", {}) or {}
-                if (
-                    litellm.turn_off_message_logging is not None
-                    and litellm.turn_off_message_logging is True
-                ):
+            # log raw request to provider (like LangFuse) -- if opted in.
+            if litellm.log_raw_request_response is True:
+                try:
+                    # [Non-blocking Extra Debug Information in metadata]
+                    _litellm_params = self.model_call_details.get("litellm_params", {})
+                    _metadata = _litellm_params.get("metadata", {}) or {}
+                    if (
+                        litellm.turn_off_message_logging is not None
+                        and litellm.turn_off_message_logging is True
+                    ):
+                        _metadata["raw_request"] = (
+                            "redacted by litellm. \
+                            'litellm.turn_off_message_logging=True'"
+                        )
+                    else:
+                        _metadata["raw_request"] = str(curl_command)
+                except Exception as e:
                     _metadata["raw_request"] = (
-                        "redacted by litellm. \
-                        'litellm.turn_off_message_logging=True'"
+                        "Unable to Log \
+                        raw request: {}".format(
+                            str(e)
+                        )
                     )
-                else:
-                    _metadata["raw_request"] = str(curl_command)
-            except Exception as e:
-                _metadata["raw_request"] = (
-                    "Unable to Log \
-                    raw request: {}".format(
-                        str(e)
-                    )
-                )
             if self.logger_fn and callable(self.logger_fn):
                 try:
                     self.logger_fn(
@@ -1626,7 +1624,6 @@ class Logging:
                             end_time=end_time,
                         )
                     except Exception as e:
-
                         complete_streaming_response = None
                 else:
                     self.sync_streaming_chunks.append(result)
@@ -2396,7 +2393,6 @@ class Logging:
                             "async_complete_streaming_response"
                             in self.model_call_details
                         ):
-
                             await customLogger.async_log_event(
                                 kwargs=self.model_call_details,
                                 response_obj=self.model_call_details[
@@ -2735,7 +2731,7 @@ class Logging:
         only redacts when litellm.turn_off_message_logging == True
         """
         # check if user opted out of logging message/response to callbacks
-        if litellm.turn_off_message_logging == True:
+        if litellm.turn_off_message_logging is True:
             # remove messages, prompts, input, response from logging
             self.model_call_details["messages"] = [
                 {"role": "user", "content": "redacted-by-litellm"}
@@ -4035,7 +4031,10 @@ def openai_token_counter(
     """
     print_verbose(f"LiteLLM: Utils - Counting tokens for OpenAI model={model}")
     try:
-        encoding = tiktoken.encoding_for_model(model)
+        if "gpt-4o" in model:
+            encoding = tiktoken.get_encoding("o200k_base")
+        else:
+            encoding = tiktoken.encoding_for_model(model)
     except KeyError:
         print_verbose("Warning: model not found. Using cl100k_base encoding.")
         encoding = tiktoken.get_encoding("cl100k_base")
@@ -6171,13 +6170,16 @@ def get_api_base(
     if litellm.model_alias_map and model in litellm.model_alias_map:
         model = litellm.model_alias_map[model]
     try:
-        model, custom_llm_provider, dynamic_api_key, dynamic_api_base = (
-            get_llm_provider(
-                model=model,
-                custom_llm_provider=_optional_params.custom_llm_provider,
-                api_base=_optional_params.api_base,
-                api_key=_optional_params.api_key,
-            )
+        (
+            model,
+            custom_llm_provider,
+            dynamic_api_key,
+            dynamic_api_base,
+        ) = get_llm_provider(
+            model=model,
+            custom_llm_provider=_optional_params.custom_llm_provider,
+            api_base=_optional_params.api_base,
+            api_key=_optional_params.api_key,
         )
     except Exception as e:
         verbose_logger.debug("Error occurred in getting api base - {}".format(str(e)))
@@ -6225,7 +6227,7 @@ def get_first_chars_messages(kwargs: dict) -> str:
 
 def get_supported_openai_params(
     model: str,
-    custom_llm_provider: str,
+    custom_llm_provider: Optional[str] = None,
     request_type: Literal["chat_completion", "embeddings"] = "chat_completion",
 ) -> Optional[list]:
     """
@@ -6240,6 +6242,11 @@ def get_supported_openai_params(
     - List if custom_llm_provider is mapped
     - None if unmapped
     """
+    if not custom_llm_provider:
+        try:
+            custom_llm_provider = litellm.get_llm_provider(model=model)[1]
+        except BadRequestError:
+            return None
     if custom_llm_provider == "bedrock":
         return litellm.AmazonConverseConfig().get_supported_openai_params(model=model)
     elif custom_llm_provider == "ollama":
@@ -6582,6 +6589,9 @@ def get_llm_provider(
                     or get_secret("FIREWORKSAI_API_KEY")
                     or get_secret("FIREWORKS_AI_TOKEN")
                 )
+            elif custom_llm_provider == "azure_ai":
+                api_base = api_base or get_secret("AZURE_AI_API_BASE")  # type: ignore
+                dynamic_api_key = api_key or get_secret("AZURE_AI_API_KEY")
             elif custom_llm_provider == "mistral":
                 # mistral is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.mistral.ai
                 api_base = (
@@ -7453,7 +7463,6 @@ def validate_environment(model: Optional[str] = None) -> dict:
 
 
 def set_callbacks(callback_list, function_id=None):
-
     global sentry_sdk_instance, capture_exception, add_breadcrumb, posthog, slack_app, alerts_channel, traceloopLogger, athinaLogger, heliconeLogger, aispendLogger, berrispendLogger, supabaseClient, liteDebuggerClient, lunaryLogger, promptLayerLogger, langFuseLogger, customLogger, weightsBiasesLogger, langsmithLogger, logfireLogger, dynamoLogger, s3Logger, dataDogLogger, prometheusLogger, greenscaleLogger, openMeterLogger
 
     try:

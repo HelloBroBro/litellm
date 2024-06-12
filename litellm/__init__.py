@@ -60,6 +60,7 @@ _async_failure_callback: List[Callable] = (
 pre_call_rules: List[Callable] = []
 post_call_rules: List[Callable] = []
 turn_off_message_logging: Optional[bool] = False
+log_raw_request_response: bool = False
 redact_messages_in_exceptions: Optional[bool] = False
 store_audit_logs = False  # Enterprise feature, allow users to see audit logs
 ## end of callbacks #############
@@ -405,6 +406,7 @@ openai_compatible_providers: List = [
     "xinference",
     "together_ai",
     "fireworks_ai",
+    "azure_ai",
 ]
 
 
@@ -609,6 +611,7 @@ provider_list: List = [
     "baseten",
     "azure",
     "azure_text",
+    "azure_ai",
     "sagemaker",
     "bedrock",
     "vllm",
