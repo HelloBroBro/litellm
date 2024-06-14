@@ -6644,7 +6644,7 @@ async def generate_key_fn(
 
         # Enterprise Feature - Audit Logging. Enable with litellm.store_audit_logs = True
         if litellm.store_audit_logs is True:
-            _updated_values = json.dumps(response)
+            _updated_values = json.dumps(response, default=str)
             asyncio.create_task(
                 create_audit_log_for_update(
                     request_data=LiteLLM_AuditLogs(
@@ -6749,10 +6749,10 @@ async def update_key_fn(
 
         # Enterprise Feature - Audit Logging. Enable with litellm.store_audit_logs = True
         if litellm.store_audit_logs is True:
-            _updated_values = json.dumps(data_json)
+            _updated_values = json.dumps(data_json, default=str)
 
             _before_value = existing_key_row.json(exclude_none=True)
-            _before_value = json.dumps(_before_value)
+            _before_value = json.dumps(_before_value, default=str)
 
             asyncio.create_task(
                 create_audit_log_for_update(
@@ -6848,7 +6848,7 @@ async def delete_key_fn(
                 )
 
                 key_row = key_row.json(exclude_none=True)
-                _key_row = json.dumps(key_row)
+                _key_row = json.dumps(key_row, default=str)
 
                 asyncio.create_task(
                     create_audit_log_for_update(
@@ -7052,6 +7052,7 @@ async def info_key_fn(
     "/spend/keys",
     tags=["Budget & Spend Tracking"],
     dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
 )
 async def spend_key_fn():
     """
@@ -7084,6 +7085,7 @@ async def spend_key_fn():
     "/spend/users",
     tags=["Budget & Spend Tracking"],
     dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
 )
 async def spend_user_fn(
     user_id: Optional[str] = fastapi.Query(
@@ -7214,6 +7216,7 @@ async def view_spend_tags(
     responses={
         200: {"model": List[LiteLLM_SpendLogs]},
     },
+    include_in_schema=False,
 )
 async def get_global_activity(
     start_date: Optional[str] = fastapi.Query(
@@ -7317,6 +7320,7 @@ async def get_global_activity(
     responses={
         200: {"model": List[LiteLLM_SpendLogs]},
     },
+    include_in_schema=False,
 )
 async def get_global_activity_model(
     start_date: Optional[str] = fastapi.Query(
@@ -7463,6 +7467,7 @@ async def get_global_activity_model(
     responses={
         200: {"model": List[LiteLLM_SpendLogs]},
     },
+    include_in_schema=False,
 )
 async def get_global_activity_exceptions_per_deployment(
     model_group: str = fastapi.Query(
@@ -7615,6 +7620,7 @@ async def get_global_activity_exceptions_per_deployment(
     responses={
         200: {"model": List[LiteLLM_SpendLogs]},
     },
+    include_in_schema=False,
 )
 async def get_global_activity_exceptions(
     model_group: str = fastapi.Query(
@@ -7825,7 +7831,6 @@ async def get_global_spend_provider(
     "/global/spend/report",
     tags=["Budget & Spend Tracking"],
     dependencies=[Depends(user_api_key_auth)],
-    include_in_schema=False,
     responses={
         200: {"model": List[LiteLLM_SpendLogs]},
     },
@@ -8525,6 +8530,7 @@ async def global_spend_reset():
     "/global/spend/logs",
     tags=["Budget & Spend Tracking"],
     dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
 )
 async def global_spend_logs(
     api_key: str = fastapi.Query(
@@ -8570,6 +8576,7 @@ async def global_spend_logs(
     "/global/spend",
     tags=["Budget & Spend Tracking"],
     dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
 )
 async def global_spend():
     """
@@ -8596,6 +8603,7 @@ async def global_spend():
     "/global/spend/keys",
     tags=["Budget & Spend Tracking"],
     dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
 )
 async def global_spend_keys(
     limit: int = fastapi.Query(
@@ -8623,6 +8631,7 @@ async def global_spend_keys(
     "/global/spend/teams",
     tags=["Budget & Spend Tracking"],
     dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
 )
 async def global_spend_per_team():
     """
@@ -8747,6 +8756,7 @@ async def global_view_all_end_users():
     "/global/spend/end_users",
     tags=["Budget & Spend Tracking"],
     dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
 )
 async def global_spend_end_users(data: Optional[GlobalEndUsersSpend] = None):
     """
@@ -8799,6 +8809,7 @@ LIMIT 100
     "/global/spend/models",
     tags=["Budget & Spend Tracking"],
     dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
 )
 async def global_spend_models(
     limit: int = fastapi.Query(
@@ -8827,6 +8838,7 @@ async def global_spend_models(
     "/global/predict/spend/logs",
     tags=["Budget & Spend Tracking"],
     dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
 )
 async def global_predict_spend_logs(request: Request):
     from enterprise.utils import _forecast_daily_cost
@@ -9942,16 +9954,18 @@ async def new_team(
     """
     Allow users to create a new team. Apply user permissions to their team.
 
-    [ASK FOR HELP](https://github.com/BerriAI/litellm/issues)
+    👉 [Detailed Doc on setting team budgets](https://docs.litellm.ai/docs/proxy/team_budgets)
+
 
     Parameters:
     - team_alias: Optional[str] - User defined team alias
     - team_id: Optional[str] - The team id of the user. If none passed, we'll generate it.
     - members_with_roles: List[{"role": "admin" or "user", "user_id": "<user-id>"}] - A list of users and their roles in the team. Get user_id when making a new user via `/user/new`.
-    - metadata: Optional[dict] - Metadata for team, store information for team. Example metadata = {"team": "core-infra", "app": "app2", "email": "ishaan@berri.ai" }
+    - metadata: Optional[dict] - Metadata for team, store information for team. Example metadata = {"extra_info": "some info"}
     - tpm_limit: Optional[int] - The TPM (Tokens Per Minute) limit for this team - all keys with this team_id will have at max this TPM limit
     - rpm_limit: Optional[int] - The RPM (Requests Per Minute) limit for this team - all keys associated with this team_id will have at max this RPM limit
     - max_budget: Optional[float] - The maximum budget allocated to the team - all keys for this team_id will have at max this max_budget
+    - budget_duration: Optional[str] - The duration of the budget for the team. Doc [here](https://docs.litellm.ai/docs/proxy/team_budgets)
     - models: Optional[list] - A list of models associated with the team - all keys for this team_id will have at most, these models. If empty, assumes all models are allowed.
     - blocked: bool - Flag indicating if the team is blocked or not - will stop all calls from keys with this team_id.
 
@@ -9975,6 +9989,21 @@ async def new_team(
       "members_with_roles": [{"role": "admin", "user_id": "user-1234"},
         {"role": "user", "user_id": "user-2434"}]
     }'
+
+    ```
+
+     ```
+    curl --location 'http://0.0.0.0:4000/team/new' \
+
+    --header 'Authorization: Bearer sk-1234' \
+
+    --header 'Content-Type: application/json' \
+
+    --data '{
+                "team_alias": "QA Prod Bot", 
+                "max_budget": 0.000000001, 
+                "budget_duration": "1d"
+            }'
 
     ```
     """
@@ -10105,7 +10134,8 @@ async def new_team(
     # Enterprise Feature - Audit Logging. Enable with litellm.store_audit_logs = True
     if litellm.store_audit_logs is True:
         _updated_values = complete_team_data.json(exclude_none=True)
-        _updated_values = json.dumps(_updated_values)
+
+        _updated_values = json.dumps(_updated_values, default=str)
 
         asyncio.create_task(
             create_audit_log_for_update(
@@ -10169,6 +10199,7 @@ async def create_audit_log_for_update(request_data: LiteLLM_AuditLogs):
 @management_endpoint_wrapper
 async def update_team(
     data: UpdateTeamRequest,
+    http_request: Request,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
     litellm_changed_by: Optional[str] = Header(
         None,
@@ -10187,6 +10218,7 @@ async def update_team(
     - tpm_limit: Optional[int] - The TPM (Tokens Per Minute) limit for this team - all keys with this team_id will have at max this TPM limit
     - rpm_limit: Optional[int] - The RPM (Requests Per Minute) limit for this team - all keys associated with this team_id will have at max this RPM limit
     - max_budget: Optional[float] - The maximum budget allocated to the team - all keys for this team_id will have at max this max_budget
+    - budget_duration: Optional[str] - The duration of the budget for the team. Doc [here](https://docs.litellm.ai/docs/proxy/team_budgets)
     - models: Optional[list] - A list of models associated with the team - all keys for this team_id will have at most, these models. If empty, assumes all models are allowed.
     - blocked: bool - Flag indicating if the team is blocked or not - will stop all calls from keys with this team_id.
 
@@ -10202,6 +10234,20 @@ async def update_team(
     --data-raw '{
         "team_id": "litellm-test-client-id-new",
         "tpm_limit": 100
+    }'
+    ```
+
+    Example - Update Team `max_budget` budget
+    ```
+    curl --location 'http://0.0.0.0:8000/team/update' \
+
+    --header 'Authorization: Bearer sk-1234' \
+
+    --header 'Content-Type: application/json' \
+
+    --data-raw '{
+        "team_id": "litellm-test-client-id-new",
+        "max_budget": 10
     }'
     ```
     """
@@ -10243,8 +10289,8 @@ async def update_team(
     # Enterprise Feature - Audit Logging. Enable with litellm.store_audit_logs = True
     if litellm.store_audit_logs is True:
         _before_value = existing_team_row.json(exclude_none=True)
-        _before_value = json.dumps(_before_value)
-        _after_value: str = json.dumps(updated_kv)
+        _before_value = json.dumps(_before_value, default=str)
+        _after_value: str = json.dumps(updated_kv, default=str)
 
         asyncio.create_task(
             create_audit_log_for_update(
@@ -11403,7 +11449,7 @@ async def model_info_v2(
     for _model in all_models:
         # provided model_info in config.yaml
         model_info = _model.get("model_info", {})
-        if debug == True:
+        if debug is True:
             _openai_client = "None"
             if llm_router is not None:
                 _openai_client = (
@@ -11428,7 +11474,7 @@ async def model_info_v2(
             litellm_model = litellm_params.get("model", None)
             try:
                 litellm_model_info = litellm.get_model_info(model=litellm_model)
-            except:
+            except Exception:
                 litellm_model_info = {}
         # 3rd pass on the model, try seeing if we can find model but without the "/" in model cost map
         if litellm_model_info == {}:
@@ -11439,8 +11485,10 @@ async def model_info_v2(
             if len(split_model) > 0:
                 litellm_model = split_model[-1]
             try:
-                litellm_model_info = litellm.get_model_info(model=litellm_model)
-            except:
+                litellm_model_info = litellm.get_model_info(
+                    model=litellm_model, custom_llm_provider=split_model[0]
+                )
+            except Exception:
                 litellm_model_info = {}
         for k, v in litellm_model_info.items():
             if k not in model_info:
@@ -11951,7 +11999,9 @@ async def model_info_v1(
             if len(split_model) > 0:
                 litellm_model = split_model[-1]
             try:
-                litellm_model_info = litellm.get_model_info(model=litellm_model)
+                litellm_model_info = litellm.get_model_info(
+                    model=litellm_model, custom_llm_provider=split_model[0]
+                )
             except:
                 litellm_model_info = {}
         for k, v in litellm_model_info.items():
@@ -12218,6 +12268,7 @@ async def alerting_settings(
     "/queue/chat/completions",
     tags=["experimental"],
     dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
 )
 async def async_queue_request(
     request: Request,
@@ -12329,18 +12380,10 @@ async def async_queue_request(
         )
 
 
-@router.get(
-    "/ollama_logs", dependencies=[Depends(user_api_key_auth)], tags=["experimental"]
-)
-async def retrieve_server_log(request: Request):
-    filepath = os.path.expanduser("~/.ollama/logs/server.log")
-    return FileResponse(filepath)
-
-
 #### LOGIN ENDPOINTS ####
 
 
-@app.get("/sso/key/generate", tags=["experimental"])
+@app.get("/sso/key/generate", tags=["experimental"], include_in_schema=False)
 async def google_login(request: Request):
     """
     Create Proxy API Keys using Google Workspace SSO. Requires setting PROXY_BASE_URL in .env
@@ -12934,7 +12977,7 @@ def get_image():
         return FileResponse(logo_path, media_type="image/jpeg")
 
 
-@app.get("/sso/callback", tags=["experimental"])
+@app.get("/sso/callback", tags=["experimental"], include_in_schema=False)
 async def auth_callback(request: Request):
     """Verify login"""
     global general_settings, ui_access_mode, premium_user
@@ -13239,6 +13282,7 @@ async def auth_callback(request: Request):
     tags=["Invite Links"],
     dependencies=[Depends(user_api_key_auth)],
     response_model=InvitationModel,
+    include_in_schema=False,
 )
 async def new_invitation(
     data: InvitationNew, user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth)
@@ -13303,6 +13347,7 @@ async def new_invitation(
     tags=["Invite Links"],
     dependencies=[Depends(user_api_key_auth)],
     response_model=InvitationModel,
+    include_in_schema=False,
 )
 async def invitation_info(
     invitation_id: str, user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth)
@@ -13354,6 +13399,7 @@ async def invitation_info(
     tags=["Invite Links"],
     dependencies=[Depends(user_api_key_auth)],
     response_model=InvitationModel,
+    include_in_schema=False,
 )
 async def invitation_update(
     data: InvitationUpdate,
@@ -13414,6 +13460,7 @@ async def invitation_update(
     tags=["Invite Links"],
     dependencies=[Depends(user_api_key_auth)],
     response_model=InvitationModel,
+    include_in_schema=False,
 )
 async def invitation_delete(
     data: InvitationDelete,
@@ -13466,6 +13513,7 @@ async def invitation_delete(
     "/config/update",
     tags=["config.yaml"],
     dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
 )
 async def update_config(config_info: ConfigYAML):
     """
@@ -13623,6 +13671,7 @@ Keep it more precise, to prevent overwrite other values unintentially
     "/config/field/update",
     tags=["config.yaml"],
     dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
 )
 async def update_config_general_settings(
     data: ConfigFieldUpdate,
@@ -13701,6 +13750,7 @@ async def update_config_general_settings(
     tags=["config.yaml"],
     dependencies=[Depends(user_api_key_auth)],
     response_model=ConfigFieldInfo,
+    include_in_schema=False,
 )
 async def get_config_general_settings(
     field_name: str,
@@ -13761,6 +13811,7 @@ async def get_config_general_settings(
     "/config/list",
     tags=["config.yaml"],
     dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
 )
 async def get_config_list(
     config_type: Literal["general_settings"],
@@ -13837,6 +13888,7 @@ async def get_config_list(
     "/config/field/delete",
     tags=["config.yaml"],
     dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
 )
 async def delete_config_general_settings(
     data: ConfigFieldDelete,
@@ -14092,6 +14144,7 @@ async def get_config():
     "/config/yaml",
     tags=["config.yaml"],
     dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
 )
 async def config_yaml_endpoint(config_info: ConfigYAML):
     """
