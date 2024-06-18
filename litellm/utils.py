@@ -7,59 +7,71 @@
 #
 #  Thank you users! We ❤️ you! - Krrish & Ishaan
 
+import ast
+import asyncio
+import base64
+import binascii
+import copy
+import datetime
+import inspect
+import itertools
+import json
+import logging
+import os
+import random  # type: ignore
+import re
+import struct
+import subprocess
+
 # What is this?
 ## Generic utils.py file. Problem-specific utils (e.g. 'cost calculation), should all be in `litellm_core_utils/`.
-import sys, re, binascii, struct
-import litellm
-import dotenv, json, traceback, threading, base64, ast
-import subprocess, os
-from os.path import abspath, join, dirname
-import litellm, openai
-import itertools
-import random, uuid, requests  # type: ignore
-from functools import wraps, lru_cache
-import datetime, time
-import tiktoken
-import uuid
-from pydantic import BaseModel
-import aiohttp
+import sys
 import textwrap
-import logging
-import asyncio, httpx, inspect
+import threading
+import time
+import traceback
+import uuid
+from dataclasses import dataclass, field
+from functools import lru_cache, wraps
 from inspect import iscoroutine
-import copy
+from os.path import abspath, dirname, join
+
+import aiohttp
+import dotenv
+import httpx
+import openai
+import requests
+import tiktoken
+from pydantic import BaseModel
 from tokenizers import Tokenizer
-from dataclasses import (
-    dataclass,
-    field,
-)
-import os
+
+import litellm
 import litellm._service_logger  # for storing API inputs, outputs, and metadata
 import litellm.litellm_core_utils
-from litellm.litellm_core_utils.core_helpers import map_finish_reason
-from litellm.llms.custom_httpx.http_handler import HTTPHandler, AsyncHTTPHandler
 from litellm.caching import DualCache
-from litellm.types.utils import (
-    CostPerToken,
-    ProviderField,
-    ModelInfo,
-    CallTypes,
-    ModelResponse,
-    EmbeddingResponse,
-    ImageResponse,
-    TranscriptionResponse,
-    TextCompletionResponse,
-    ChatCompletionDeltaToolCall,
-    Message,
-    Delta,
-    Choices,
-    Usage,
-    StreamingChoices,
-    Embedding,
-    TextChoices,
-)
+from litellm.litellm_core_utils.core_helpers import map_finish_reason
 from litellm.litellm_core_utils.redact_messages import (
     redact_message_input_output_from_logging,
+)
+from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
+from litellm.types.utils import (
+    CallTypes,
+    ChatCompletionDeltaToolCall,
+    Choices,
+    CostPerToken,
+    Delta,
+    Embedding,
+    EmbeddingResponse,
+    ImageResponse,
+    Message,
+    ModelInfo,
+    ModelResponse,
+    ProviderField,
+    StreamingChoices,
+    TextChoices,
+    TextCompletionResponse,
+    TranscriptionResponse,
+    Usage,
 )
 
 oidc_cache = DualCache()
@@ -87,33 +99,34 @@ with resources.open_text("litellm.llms.tokenizers", "anthropic_tokenizer.json") 
 # Convert to str (if necessary)
 claude_json_str = json.dumps(json_data)
 import importlib.metadata
-from ._logging import verbose_logger
-from .types.router import LiteLLM_Params
-from .types.llms.openai import (
-    ChatCompletionToolCallChunk,
-    ChatCompletionToolCallFunctionChunk,
-    ChatCompletionDeltaToolCallChunk,
-)
 
-from .proxy._types import KeyManagementSystem
 from openai import OpenAIError as OriginalError
-from .caching import S3Cache, RedisSemanticCache, RedisCache
+
+from ._logging import verbose_logger
+from .caching import RedisCache, RedisSemanticCache, S3Cache
 from .exceptions import (
-    AuthenticationError,
-    BadRequestError,
-    NotFoundError,
-    RateLimitError,
-    ServiceUnavailableError,
-    OpenAIError,
-    PermissionDeniedError,
-    ContextWindowExceededError,
-    ContentPolicyViolationError,
-    Timeout,
     APIConnectionError,
     APIError,
+    AuthenticationError,
+    BadRequestError,
     BudgetExceededError,
+    ContentPolicyViolationError,
+    ContextWindowExceededError,
+    NotFoundError,
+    OpenAIError,
+    PermissionDeniedError,
+    RateLimitError,
+    ServiceUnavailableError,
+    Timeout,
     UnprocessableEntityError,
 )
+from .proxy._types import KeyManagementSystem
+from .types.llms.openai import (
+    ChatCompletionDeltaToolCallChunk,
+    ChatCompletionToolCallChunk,
+    ChatCompletionToolCallFunctionChunk,
+)
+from .types.router import LiteLLM_Params
 
 try:
     from .proxy.enterprise.enterprise_callbacks.generic_api_callback import (
@@ -122,21 +135,22 @@ try:
 except Exception as e:
     verbose_logger.debug(f"Exception import enterprise features {str(e)}")
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import (
-    cast,
-    List,
-    Dict,
-    Union,
-    Optional,
-    Literal,
     Any,
     BinaryIO,
-    Iterable,
-    Tuple,
     Callable,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    Union,
+    cast,
 )
+
 from .caching import Cache
-from concurrent.futures import ThreadPoolExecutor
 
 ####### ENVIRONMENT VARIABLES ####################
 # Adjust to your specific application needs / system capabilities.
@@ -313,15 +327,6 @@ class Rules:
         return True
 
 
-def _init_custom_logger_compatible_class(
-    logging_integration: litellm._custom_logger_compatible_callbacks_literal,
-) -> Callable:
-    if logging_integration == "lago":
-        return LagoLogger()  # type: ignore
-    elif logging_integration == "openmeter":
-        return OpenMeterLogger()  # type: ignore
-
-
 ####### CLIENT ###################
 # make it easy to log if completion/embedding runs succeeded or failed + see what happened | Non-Blocking
 def function_setup(
@@ -335,11 +340,14 @@ def function_setup(
     try:
         global callback_list, add_breadcrumb, user_logger_fn, Logging
         function_id = kwargs["id"] if "id" in kwargs else None
+
         if len(litellm.callbacks) > 0:
             for callback in litellm.callbacks:
                 # check if callback is a string - e.g. "lago", "openmeter"
                 if isinstance(callback, str):
-                    callback = _init_custom_logger_compatible_class(callback)
+                    callback = litellm.litellm_core_utils.litellm_logging._init_custom_logger_compatible_class(
+                        callback
+                    )
                     if any(
                         isinstance(cb, type(callback))
                         for cb in litellm._async_success_callback
@@ -1816,6 +1824,32 @@ def supports_httpx_timeout(custom_llm_provider: str) -> bool:
     return False
 
 
+def supports_system_messages(model: str, custom_llm_provider: Optional[str]) -> bool:
+    """
+    Check if the given model supports function calling and return a boolean value.
+
+    Parameters:
+    model (str): The model name to be checked.
+
+    Returns:
+    bool: True if the model supports function calling, False otherwise.
+
+    Raises:
+    Exception: If the given model is not found in model_prices_and_context_window.json.
+    """
+    try:
+        model_info = litellm.get_model_info(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
+        if model_info.get("supports_system_messages", False) is True:
+            return True
+        return False
+    except Exception:
+        raise Exception(
+            f"Model not in model_prices_and_context_window.json. You passed model={model}, custom_llm_provider={custom_llm_provider}."
+        )
+
+
 def supports_function_calling(model: str) -> bool:
     """
     Check if the given model supports function calling and return a boolean value.
@@ -1831,7 +1865,7 @@ def supports_function_calling(model: str) -> bool:
     """
     if model in litellm.model_cost:
         model_info = litellm.model_cost[model]
-        if model_info.get("supports_function_calling", False):
+        if model_info.get("supports_function_calling", False) is True:
             return True
         return False
     else:
@@ -1855,7 +1889,7 @@ def supports_vision(model: str):
     """
     if model in litellm.model_cost:
         model_info = litellm.model_cost[model]
-        if model_info.get("supports_vision", False):
+        if model_info.get("supports_vision", False) is True:
             return True
         return False
     else:
@@ -1877,7 +1911,7 @@ def supports_parallel_function_calling(model: str):
     """
     if model in litellm.model_cost:
         model_info = litellm.model_cost[model]
-        if model_info.get("supports_parallel_function_calling", False):
+        if model_info.get("supports_parallel_function_calling", False) is True:
             return True
         return False
     else:
@@ -2359,6 +2393,7 @@ def get_optional_params(
             and custom_llm_provider != "together_ai"
             and custom_llm_provider != "groq"
             and custom_llm_provider != "deepseek"
+            and custom_llm_provider != "codestral"
             and custom_llm_provider != "mistral"
             and custom_llm_provider != "anthropic"
             and custom_llm_provider != "cohere_chat"
@@ -2967,7 +3002,7 @@ def get_optional_params(
             optional_params["stream"] = stream
         if max_tokens:
             optional_params["max_tokens"] = max_tokens
-    elif custom_llm_provider == "mistral":
+    elif custom_llm_provider == "mistral" or custom_llm_provider == "codestral":
         supported_params = get_supported_openai_params(
             model=model, custom_llm_provider=custom_llm_provider
         )
@@ -2975,6 +3010,15 @@ def get_optional_params(
         optional_params = litellm.MistralConfig().map_openai_params(
             non_default_params=non_default_params, optional_params=optional_params
         )
+    elif custom_llm_provider == "text-completion-codestral":
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
+        _check_valid_arg(supported_params=supported_params)
+        optional_params = litellm.MistralTextCompletionConfig().map_openai_params(
+            non_default_params=non_default_params, optional_params=optional_params
+        )
+
     elif custom_llm_provider == "databricks":
         supported_params = get_supported_openai_params(
             model=model, custom_llm_provider=custom_llm_provider
@@ -3007,7 +3051,6 @@ def get_optional_params(
             optional_params["response_format"] = response_format
         if seed is not None:
             optional_params["seed"] = seed
-
     elif custom_llm_provider == "deepseek":
         supported_params = get_supported_openai_params(
             model=model, custom_llm_provider=custom_llm_provider
@@ -3626,11 +3669,14 @@ def get_supported_openai_params(
             "tool_choice",
             "max_retries",
         ]
-    elif custom_llm_provider == "mistral":
+    elif custom_llm_provider == "mistral" or custom_llm_provider == "codestral":
+        # mistal and codestral api have the exact same params
         if request_type == "chat_completion":
             return litellm.MistralConfig().get_supported_openai_params()
         elif request_type == "embeddings":
             return litellm.MistralEmbeddingConfig().get_supported_openai_params()
+    elif custom_llm_provider == "text-completion-codestral":
+        return litellm.MistralTextCompletionConfig().get_supported_openai_params()
     elif custom_llm_provider == "replicate":
         return [
             "stream",
@@ -3867,6 +3913,10 @@ def get_llm_provider(
                 # groq is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.groq.com/openai/v1
                 api_base = "https://api.groq.com/openai/v1"
                 dynamic_api_key = get_secret("GROQ_API_KEY")
+            elif custom_llm_provider == "codestral":
+                # codestral is openai compatible, we just need to set this to custom_openai and have the api_base be https://codestral.mistral.ai/v1
+                api_base = "https://codestral.mistral.ai/v1"
+                dynamic_api_key = get_secret("CODESTRAL_API_KEY")
             elif custom_llm_provider == "deepseek":
                 # deepseek is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.deepseek.com/v1
                 api_base = "https://api.deepseek.com/v1"
@@ -3959,6 +4009,12 @@ def get_llm_provider(
                     elif endpoint == "api.groq.com/openai/v1":
                         custom_llm_provider = "groq"
                         dynamic_api_key = get_secret("GROQ_API_KEY")
+                    elif endpoint == "https://codestral.mistral.ai/v1":
+                        custom_llm_provider = "codestral"
+                        dynamic_api_key = get_secret("CODESTRAL_API_KEY")
+                    elif endpoint == "https://codestral.mistral.ai/v1":
+                        custom_llm_provider = "text-completion-codestral"
+                        dynamic_api_key = get_secret("CODESTRAL_API_KEY")
                     elif endpoint == "api.deepseek.com/v1":
                         custom_llm_provider = "deepseek"
                         dynamic_api_key = get_secret("DEEPSEEK_API_KEY")
@@ -4279,8 +4335,10 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
                 split_model, custom_llm_provider, _, _ = get_llm_provider(model=model)
             except:
                 pass
+            combined_model_name = model
         else:
             split_model = model
+            combined_model_name = "{}/{}".format(custom_llm_provider, model)
         #########################
 
         supported_openai_params = litellm.get_supported_openai_params(
@@ -4288,43 +4346,131 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
         )
         if custom_llm_provider == "huggingface":
             max_tokens = _get_max_position_embeddings(model_name=model)
-            return {
-                "max_tokens": max_tokens,  # type: ignore
-                "input_cost_per_token": 0,
-                "output_cost_per_token": 0,
-                "litellm_provider": "huggingface",
-                "mode": "chat",
-                "supported_openai_params": supported_openai_params,
-            }
+            return ModelInfo(
+                max_tokens=max_tokens,  # type: ignore
+                max_input_tokens=None,
+                max_output_tokens=None,
+                input_cost_per_token=0,
+                output_cost_per_token=0,
+                litellm_provider="huggingface",
+                mode="chat",
+                supported_openai_params=supported_openai_params,
+                supports_system_messages=None,
+            )
         else:
             """
-            Check if:
-            1. 'model' in litellm.model_cost. Checks "groq/llama3-8b-8192" in  litellm.model_cost
-            2. 'split_model' in litellm.model_cost. Checks "llama3-8b-8192" in litellm.model_cost
+            Check if: (in order of specificity)
+            1. 'custom_llm_provider/model' in litellm.model_cost. Checks "groq/llama3-8b-8192" if model="llama3-8b-8192" and custom_llm_provider="groq"
+            2. 'model' in litellm.model_cost. Checks "groq/llama3-8b-8192" in  litellm.model_cost if model="groq/llama3-8b-8192" and custom_llm_provider=None
+            3. 'split_model' in litellm.model_cost. Checks "llama3-8b-8192" in litellm.model_cost if model="groq/llama3-8b-8192"
             """
-            if model in litellm.model_cost:
+            if combined_model_name in litellm.model_cost:
+                _model_info = litellm.model_cost[combined_model_name]
+                _model_info["supported_openai_params"] = supported_openai_params
+                if (
+                    "litellm_provider" in _model_info
+                    and _model_info["litellm_provider"] != custom_llm_provider
+                ):
+                    if custom_llm_provider == "vertex_ai" and _model_info[
+                        "litellm_provider"
+                    ].startswith("vertex_ai"):
+                        pass
+                    else:
+                        raise Exception
+                return ModelInfo(
+                    max_tokens=_model_info.get("max_tokens", None),
+                    max_input_tokens=_model_info.get("max_input_tokens", None),
+                    max_output_tokens=_model_info.get("max_output_tokens", None),
+                    input_cost_per_token=_model_info.get("input_cost_per_token", 0),
+                    input_cost_per_token_above_128k_tokens=_model_info.get(
+                        "input_cost_per_token_above_128k_tokens", None
+                    ),
+                    output_cost_per_token=_model_info.get("output_cost_per_token", 0),
+                    output_cost_per_token_above_128k_tokens=_model_info.get(
+                        "output_cost_per_token_above_128k_tokens", None
+                    ),
+                    litellm_provider=_model_info.get(
+                        "litellm_provider", custom_llm_provider
+                    ),
+                    mode=_model_info.get("mode"),
+                    supported_openai_params=supported_openai_params,
+                    supports_system_messages=_model_info.get(
+                        "supports_system_messages", None
+                    ),
+                )
+            elif model in litellm.model_cost:
                 _model_info = litellm.model_cost[model]
                 _model_info["supported_openai_params"] = supported_openai_params
                 if (
                     "litellm_provider" in _model_info
                     and _model_info["litellm_provider"] != custom_llm_provider
                 ):
-                    raise Exception
-                return _model_info
-            if split_model in litellm.model_cost:
+                    if custom_llm_provider == "vertex_ai" and _model_info[
+                        "litellm_provider"
+                    ].startswith("vertex_ai"):
+                        pass
+                    else:
+                        raise Exception
+                return ModelInfo(
+                    max_tokens=_model_info.get("max_tokens", None),
+                    max_input_tokens=_model_info.get("max_input_tokens", None),
+                    max_output_tokens=_model_info.get("max_output_tokens", None),
+                    input_cost_per_token=_model_info.get("input_cost_per_token", 0),
+                    input_cost_per_token_above_128k_tokens=_model_info.get(
+                        "input_cost_per_token_above_128k_tokens", None
+                    ),
+                    output_cost_per_token=_model_info.get("output_cost_per_token", 0),
+                    output_cost_per_token_above_128k_tokens=_model_info.get(
+                        "output_cost_per_token_above_128k_tokens", None
+                    ),
+                    litellm_provider=_model_info.get(
+                        "litellm_provider", custom_llm_provider
+                    ),
+                    mode=_model_info.get("mode"),
+                    supported_openai_params=supported_openai_params,
+                    supports_system_messages=_model_info.get(
+                        "supports_system_messages", None
+                    ),
+                )
+            elif split_model in litellm.model_cost:
                 _model_info = litellm.model_cost[split_model]
                 _model_info["supported_openai_params"] = supported_openai_params
                 if (
                     "litellm_provider" in _model_info
                     and _model_info["litellm_provider"] != custom_llm_provider
                 ):
-                    raise Exception
-                return _model_info
+                    if custom_llm_provider == "vertex_ai" and _model_info[
+                        "litellm_provider"
+                    ].startswith("vertex_ai"):
+                        pass
+                    else:
+                        raise Exception
+                return ModelInfo(
+                    max_tokens=_model_info.get("max_tokens", None),
+                    max_input_tokens=_model_info.get("max_input_tokens", None),
+                    max_output_tokens=_model_info.get("max_output_tokens", None),
+                    input_cost_per_token=_model_info.get("input_cost_per_token", 0),
+                    input_cost_per_token_above_128k_tokens=_model_info.get(
+                        "input_cost_per_token_above_128k_tokens", None
+                    ),
+                    output_cost_per_token=_model_info.get("output_cost_per_token", 0),
+                    output_cost_per_token_above_128k_tokens=_model_info.get(
+                        "output_cost_per_token_above_128k_tokens", None
+                    ),
+                    litellm_provider=_model_info.get(
+                        "litellm_provider", custom_llm_provider
+                    ),
+                    mode=_model_info.get("mode"),
+                    supported_openai_params=supported_openai_params,
+                    supports_system_messages=_model_info.get(
+                        "supports_system_messages", None
+                    ),
+                )
             else:
                 raise ValueError(
                     "This model isn't mapped yet. Add it here - https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json"
                 )
-    except:
+    except Exception:
         raise Exception(
             "This model isn't mapped yet. Add it here - https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json"
         )
@@ -4373,8 +4519,9 @@ def function_to_dict(input_function):  # noqa: C901
     # Get function name and docstring
     try:
         import inspect
-        from numpydoc.docscrape import NumpyDocString
         from ast import literal_eval
+
+        from numpydoc.docscrape import NumpyDocString
     except Exception as e:
         raise e
 
@@ -4639,6 +4786,14 @@ def validate_environment(model: Optional[str] = None) -> dict:
                 missing_keys.append("GEMINI_API_KEY")
         elif custom_llm_provider == "groq":
             if "GROQ_API_KEY" in os.environ:
+                keys_in_environment = True
+            else:
+                missing_keys.append("GROQ_API_KEY")
+        elif (
+            custom_llm_provider == "codestral"
+            or custom_llm_provider == "text-completion-codestral"
+        ):
+            if "CODESTRAL_API_KEY" in os.environ:
                 keys_in_environment = True
             else:
                 missing_keys.append("GROQ_API_KEY")
@@ -5077,7 +5232,7 @@ def prompt_token_calculator(model, messages):
             import anthropic
         except:
             Exception("Anthropic import failed please run `pip install anthropic`")
-        from anthropic import Anthropic, HUMAN_PROMPT, AI_PROMPT
+        from anthropic import AI_PROMPT, HUMAN_PROMPT, Anthropic
 
         anthropic = Anthropic()
         num_tokens = anthropic.count_tokens(text)
@@ -6839,7 +6994,7 @@ def exception_type(
                         llm_provider="azure",
                         model=model,
                         litellm_debug_info=extra_information,
-                        response=original_exception.response,
+                        response=getattr(original_exception, "response", None),
                     )
                 elif "invalid_request_error" in error_str:
                     exception_mapping_worked = True
@@ -6848,7 +7003,7 @@ def exception_type(
                         llm_provider="azure",
                         model=model,
                         litellm_debug_info=extra_information,
-                        response=original_exception.response,
+                        response=getattr(original_exception, "response", None),
                     )
                 elif (
                     "The api_key client option must be set either by passing api_key to the client or by setting"
@@ -6955,7 +7110,7 @@ def exception_type(
                 message=f"{exception_provider} BadRequestError : This can happen due to missing AZURE_API_VERSION: {str(original_exception)}",
                 model=model,
                 llm_provider=custom_llm_provider,
-                response=original_exception.response,
+                response=getattr(original_exception, "response", None),
             )
         else:  # ensure generic errors always return APIConnectionError=
             """
@@ -6964,7 +7119,9 @@ def exception_type(
             exception_mapping_worked = True
             if hasattr(original_exception, "request"):
                 raise APIConnectionError(
-                    message=f"{str(original_exception)}",
+                    message="{}\n{}".format(
+                        str(original_exception), traceback.format_exc()
+                    ),
                     llm_provider=custom_llm_provider,
                     model=model,
                     request=original_exception.request,
@@ -7174,14 +7331,11 @@ def get_secret(
                     b64_flag = _is_base64(encrypted_secret)
                     if b64_flag == True:  # if passed in as encoded b64 string
                         encrypted_secret = base64.b64decode(encrypted_secret)
-                    if not isinstance(encrypted_secret, bytes):
-                        # If it's not, assume it's a string and encode it to bytes
-                        ciphertext = eval(
-                            encrypted_secret.encode()
-                        )  # assuming encrypted_secret is something like - b'\n$\x00D\xac\xb4/t)07\xe5\xf6..'
-                    else:
                         ciphertext = encrypted_secret
-
+                    else:
+                        raise ValueError(
+                            f"Google KMS requires the encrypted secret to be encoded in base64"
+                        )  # fix for this vulnerability https://huntr.com/bounties/ae623c2f-b64b-4245-9ed4-f13a0a5824ce
                     response = client.decrypt(
                         request={
                             "name": litellm._google_kms_resource_name,
@@ -8516,6 +8670,25 @@ class CustomStreamWrapper:
                         completion_tokens=response_obj["usage"].completion_tokens,
                         total_tokens=response_obj["usage"].total_tokens,
                     )
+            elif self.custom_llm_provider == "text-completion-codestral":
+                response_obj = litellm.MistralTextCompletionConfig()._chunk_parser(
+                    chunk
+                )
+                completion_obj["content"] = response_obj["text"]
+                print_verbose(f"completion obj content: {completion_obj['content']}")
+                if response_obj["is_finished"]:
+                    self.received_finish_reason = response_obj["finish_reason"]
+                if (
+                    self.stream_options
+                    and self.stream_options.get("include_usage", False) == True
+                    and response_obj["usage"] is not None
+                ):
+                    self.sent_stream_usage = True
+                    model_response.usage = litellm.Usage(
+                        prompt_tokens=response_obj["usage"].prompt_tokens,
+                        completion_tokens=response_obj["usage"].completion_tokens,
+                        total_tokens=response_obj["usage"].total_tokens,
+                    )
             elif self.custom_llm_provider == "databricks":
                 response_obj = litellm.DatabricksConfig()._chunk_parser(chunk)
                 completion_obj["content"] = response_obj["text"]
@@ -8989,6 +9162,7 @@ class CustomStreamWrapper:
                 or self.custom_llm_provider == "azure"
                 or self.custom_llm_provider == "custom_openai"
                 or self.custom_llm_provider == "text-completion-openai"
+                or self.custom_llm_provider == "text-completion-codestral"
                 or self.custom_llm_provider == "azure_text"
                 or self.custom_llm_provider == "anthropic"
                 or self.custom_llm_provider == "anthropic_text"

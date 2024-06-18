@@ -1,74 +1,78 @@
 # What is this?
 ## Common Utility file for Logging handler
 # Logging function -> log the exact model details + what's being sent | Non-Blocking
-from litellm.types.utils import CallTypes
-from typing import Optional
+import copy
 import datetime
+import json
+import os
+import subprocess
+import sys
+import time
+import traceback
+import uuid
+from typing import Any, Callable, Dict, List, Optional
+
+import litellm
 from litellm import (
-    verbose_logger,
     json_logs,
     log_raw_request_response,
     turn_off_message_logging,
+    verbose_logger,
 )
-import traceback
-import litellm
-import copy
-import sys
-import uuid
-import os
 from litellm.integrations.custom_logger import CustomLogger
-import json
-import time
 from litellm.litellm_core_utils.redact_messages import (
     redact_message_input_output_from_logging,
 )
-from litellm.utils import (
-    _get_base_model_from_metadata,
-    supabaseClient,
-    liteDebuggerClient,
-    promptLayerLogger,
-    weightsBiasesLogger,
-    langsmithLogger,
-    logfireLogger,
-    capture_exception,
-    add_breadcrumb,
-    lunaryLogger,
-    prometheusLogger,
-    print_verbose,
-    customLogger,
-    prompt_token_calculator,
-)
 from litellm.types.utils import (
-    ModelResponse,
+    CallTypes,
     EmbeddingResponse,
     ImageResponse,
-    TranscriptionResponse,
+    ModelResponse,
     TextCompletionResponse,
+    TranscriptionResponse,
 )
-import subprocess
-from ..integrations.traceloop import TraceloopLogger
-from ..integrations.athina import AthinaLogger
-from ..integrations.helicone import HeliconeLogger
+from litellm.utils import (
+    _get_base_model_from_metadata,
+    add_breadcrumb,
+    capture_exception,
+    customLogger,
+    langsmithLogger,
+    liteDebuggerClient,
+    logfireLogger,
+    lunaryLogger,
+    print_verbose,
+    prometheusLogger,
+    prompt_token_calculator,
+    promptLayerLogger,
+    supabaseClient,
+    weightsBiasesLogger,
+)
+
 from ..integrations.aispend import AISpendLogger
+from ..integrations.athina import AthinaLogger
 from ..integrations.berrispend import BerriSpendLogger
-from ..integrations.supabase import Supabase
-from ..integrations.lunary import LunaryLogger
-from ..integrations.prompt_layer import PromptLayerLogger
-from ..integrations.langsmith import LangsmithLogger
-from ..integrations.logfire_logger import LogfireLogger, LogfireLevel
-from ..integrations.weights_biases import WeightsBiasesLogger
+from ..integrations.clickhouse import ClickhouseLogger
 from ..integrations.custom_logger import CustomLogger
-from ..integrations.langfuse import LangFuseLogger
-from ..integrations.openmeter import OpenMeterLogger
-from ..integrations.lago import LagoLogger
 from ..integrations.datadog import DataDogLogger
+from ..integrations.dynamodb import DyanmoDBLogger
+from ..integrations.greenscale import GreenscaleLogger
+from ..integrations.helicone import HeliconeLogger
+from ..integrations.lago import LagoLogger
+from ..integrations.langfuse import LangFuseLogger
+from ..integrations.langsmith import LangsmithLogger
+from ..integrations.litedebugger import LiteDebugger
+from ..integrations.logfire_logger import LogfireLevel, LogfireLogger
+from ..integrations.lunary import LunaryLogger
+from ..integrations.openmeter import OpenMeterLogger
 from ..integrations.prometheus import PrometheusLogger
 from ..integrations.prometheus_services import PrometheusServicesLogger
-from ..integrations.dynamodb import DyanmoDBLogger
+from ..integrations.prompt_layer import PromptLayerLogger
 from ..integrations.s3 import S3Logger
-from ..integrations.clickhouse import ClickhouseLogger
-from ..integrations.greenscale import GreenscaleLogger
-from ..integrations.litedebugger import LiteDebugger
+from ..integrations.supabase import Supabase
+from ..integrations.traceloop import TraceloopLogger
+from ..integrations.weights_biases import WeightsBiasesLogger
+
+_in_memory_loggers: List[Any] = []
 
 
 class Logging:
@@ -534,7 +538,7 @@ class Logging:
 
             if complete_streaming_response is not None:
                 verbose_logger.debug(
-                    f"Logging Details LiteLLM-Success Call streaming complete"
+                    "Logging Details LiteLLM-Success Call streaming complete"
                 )
                 self.model_call_details["complete_streaming_response"] = (
                     complete_streaming_response
@@ -1117,7 +1121,7 @@ class Logging:
                     )
                     if capture_exception:  # log this error to sentry for debugging
                         capture_exception(e)
-        except:
+        except Exception as e:
             verbose_logger.error(
                 "LiteLLM.LoggingError: [Non-Blocking] Exception occurred while success logging {}\n{}".format(
                     str(e), traceback.format_exc()
@@ -1610,6 +1614,7 @@ class Logging:
                             level=LogfireLevel.ERROR.value,
                             print_verbose=print_verbose,
                         )
+
                 except Exception as e:
                     print_verbose(
                         f"LiteLLM.LoggingError: [Non-Blocking] Exception occurred while failure logging with integrations {str(e)}"
@@ -1778,3 +1783,43 @@ def set_callbacks(callback_list, function_id=None):
                 customLogger = CustomLogger()
     except Exception as e:
         raise e
+
+
+def _init_custom_logger_compatible_class(
+    logging_integration: litellm._custom_logger_compatible_callbacks_literal,
+) -> Callable:
+    if logging_integration == "lago":
+        for callback in _in_memory_loggers:
+            if isinstance(callback, LagoLogger):
+                return callback  # type: ignore
+
+        lago_logger = LagoLogger()
+        _in_memory_loggers.append(lago_logger)
+        return lago_logger  # type: ignore
+    elif logging_integration == "openmeter":
+        for callback in _in_memory_loggers:
+            if isinstance(callback, OpenMeterLogger):
+                return callback  # type: ignore
+
+        _openmeter_logger = OpenMeterLogger()
+        _in_memory_loggers.append(_openmeter_logger)
+        return _openmeter_logger  # type: ignore
+    elif logging_integration == "logfire":
+        if "LOGFIRE_TOKEN" not in os.environ:
+            raise ValueError("LOGFIRE_TOKEN not found in environment variables")
+        from litellm.integrations.opentelemetry import (
+            OpenTelemetry,
+            OpenTelemetryConfig,
+        )
+
+        otel_config = OpenTelemetryConfig(
+            exporter="otlp_http",
+            endpoint="https://logfire-api.pydantic.dev/v1/traces",
+            headers=f"Authorization={os.getenv('LOGFIRE_TOKEN')}",
+        )
+        for callback in _in_memory_loggers:
+            if isinstance(callback, OpenTelemetry):
+                return callback  # type: ignore
+        _otel_logger = OpenTelemetry(config=otel_config)
+        _in_memory_loggers.append(_otel_logger)
+        return _otel_logger  # type: ignore

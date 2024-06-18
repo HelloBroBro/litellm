@@ -13,7 +13,10 @@ from litellm._logging import (
     verbose_logger,
     json_logs,
     _turn_on_json,
+    log_level,
 )
+
+
 from litellm.proxy._types import (
     KeyManagementSystem,
     KeyManagementSettings,
@@ -34,7 +37,7 @@ input_callback: List[Union[str, Callable]] = []
 success_callback: List[Union[str, Callable]] = []
 failure_callback: List[Union[str, Callable]] = []
 service_callback: List[Union[str, Callable]] = []
-_custom_logger_compatible_callbacks_literal = Literal["lago", "openmeter"]
+_custom_logger_compatible_callbacks_literal = Literal["lago", "openmeter", "logfire"]
 callbacks: List[Union[Callable, _custom_logger_compatible_callbacks_literal]] = []
 _langfuse_default_tags: Optional[
     List[
@@ -338,6 +341,7 @@ bedrock_models: List = []
 deepinfra_models: List = []
 perplexity_models: List = []
 watsonx_models: List = []
+gemini_models: List = []
 for key, value in model_cost.items():
     if value.get("litellm_provider") == "openai":
         open_ai_chat_completion_models.append(key)
@@ -384,13 +388,16 @@ for key, value in model_cost.items():
         perplexity_models.append(key)
     elif value.get("litellm_provider") == "watsonx":
         watsonx_models.append(key)
-
+    elif value.get("litellm_provider") == "gemini":
+        gemini_models.append(key)
 # known openai compatible endpoints - we'll eventually move this list to the model_prices_and_context_window.json dictionary
 openai_compatible_endpoints: List = [
     "api.perplexity.ai",
     "api.endpoints.anyscale.com/v1",
     "api.deepinfra.com/v1/openai",
     "api.mistral.ai/v1",
+    "codestral.mistral.ai/v1/chat/completions",
+    "codestral.mistral.ai/v1/fim/completions",
     "api.groq.com/openai/v1",
     "api.deepseek.com/v1",
     "api.together.xyz/v1",
@@ -401,6 +408,7 @@ openai_compatible_providers: List = [
     "anyscale",
     "mistral",
     "groq",
+    "codestral",
     "deepseek",
     "deepinfra",
     "perplexity",
@@ -591,6 +599,7 @@ model_list = (
     + maritalk_models
     + vertex_language_models
     + watsonx_models
+    + gemini_models
 )
 
 provider_list: List = [
@@ -627,6 +636,8 @@ provider_list: List = [
     "anyscale",
     "mistral",
     "groq",
+    "codestral",
+    "text-completion-codestral",
     "deepseek",
     "maritalk",
     "voyage",
@@ -663,6 +674,7 @@ models_by_provider: dict = {
     "perplexity": perplexity_models,
     "maritalk": maritalk_models,
     "watsonx": watsonx_models,
+    "gemini": gemini_models,
 }
 
 # mapping for those models which have larger equivalents
@@ -727,6 +739,7 @@ from .utils import (
     supports_function_calling,
     supports_parallel_function_calling,
     supports_vision,
+    supports_system_messages,
     get_litellm_params,
     acreate,
     get_model_list,
@@ -794,6 +807,7 @@ from .llms.openai import (
     DeepInfraConfig,
     AzureAIStudioConfig,
 )
+from .llms.text_completion_codestral import MistralTextCompletionConfig
 from .llms.azure import (
     AzureOpenAIConfig,
     AzureOpenAIError,
