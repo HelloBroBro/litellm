@@ -50,6 +50,7 @@ import litellm._service_logger  # for storing API inputs, outputs, and metadata
 import litellm.litellm_core_utils
 from litellm.caching import DualCache
 from litellm.litellm_core_utils.core_helpers import map_finish_reason
+from litellm.litellm_core_utils.llm_request_utils import _ensure_extra_body_is_safe
 from litellm.litellm_core_utils.redact_messages import (
     redact_message_input_output_from_logging,
 )
@@ -2646,7 +2647,7 @@ def get_optional_params(
         if presence_penalty is not None:
             optional_params["presencePenalty"] = {"scale": presence_penalty}
     elif (
-        custom_llm_provider == "palm" or custom_llm_provider == "gemini"
+        custom_llm_provider == "palm"
     ):  # https://developers.generativeai.google/tutorials/curl_quickstart
         ## check if unsupported param passed in
         supported_params = get_supported_openai_params(
@@ -2693,7 +2694,7 @@ def get_optional_params(
         print_verbose(
             f"(end) INSIDE THE VERTEX AI OPTIONAL PARAM BLOCK - optional_params: {optional_params}"
         )
-    elif custom_llm_provider == "vertex_ai_beta":
+    elif custom_llm_provider == "vertex_ai_beta" or custom_llm_provider == "gemini":
         supported_params = get_supported_openai_params(
             model=model, custom_llm_provider=custom_llm_provider
         )
@@ -2950,6 +2951,11 @@ def get_optional_params(
             non_default_params=non_default_params,
             optional_params=optional_params,
             model=model,
+            drop_params=(
+                drop_params
+                if drop_params is not None and isinstance(drop_params, bool)
+                else False
+            ),
         )
     elif custom_llm_provider == "perplexity":
         supported_params = get_supported_openai_params(
@@ -3251,6 +3257,10 @@ def get_optional_params(
                 extra_body[k] = passed_params[k]
         optional_params.setdefault("extra_body", {})
         optional_params["extra_body"] = {**optional_params["extra_body"], **extra_body}
+
+        optional_params["extra_body"] = _ensure_extra_body_is_safe(
+            extra_body=optional_params["extra_body"]
+        )
     else:
         # if user passed in non-default kwargs for specific providers/models, pass them along
         for k in passed_params.keys():
@@ -3716,7 +3726,7 @@ def get_supported_openai_params(
         elif request_type == "embeddings":
             return litellm.DatabricksEmbeddingConfig().get_supported_openai_params()
     elif custom_llm_provider == "palm" or custom_llm_provider == "gemini":
-        return ["temperature", "top_p", "stream", "n", "stop", "max_tokens"]
+        return litellm.VertexAIConfig().get_supported_openai_params()
     elif custom_llm_provider == "vertex_ai":
         if request_type == "chat_completion":
             return litellm.VertexAIConfig().get_supported_openai_params()
@@ -6230,7 +6240,11 @@ def exception_type(
                         llm_provider="sagemaker",
                         response=original_exception.response,
                     )
-            elif custom_llm_provider == "vertex_ai":
+            elif (
+                custom_llm_provider == "vertex_ai"
+                or custom_llm_provider == "vertex_ai_beta"
+                or custom_llm_provider == "gemini"
+            ):
                 if (
                     "Vertex AI API has not been used in project" in error_str
                     or "Unable to find your project" in error_str
@@ -6248,6 +6262,13 @@ def exception_type(
                             ),
                         ),
                         litellm_debug_info=extra_information,
+                    )
+                if "400 Request payload size exceeds" in error_str:
+                    exception_mapping_worked = True
+                    raise ContextWindowExceededError(
+                        message=f"VertexException - {error_str}",
+                        model=model,
+                        llm_provider=custom_llm_provider,
                     )
                 elif (
                     "None Unknown Error." in error_str
@@ -6282,13 +6303,13 @@ def exception_type(
                     )
                 elif "The response was blocked." in error_str:
                     exception_mapping_worked = True
-                    raise UnprocessableEntityError(
-                        message=f"VertexAIException UnprocessableEntityError - {error_str}",
+                    raise ContentPolicyViolationError(
+                        message=f"VertexAIException ContentPolicyViolationError - {error_str}",
                         model=model,
                         llm_provider="vertex_ai",
                         litellm_debug_info=extra_information,
                         response=httpx.Response(
-                            status_code=422,
+                            status_code=400,
                             request=httpx.Request(
                                 method="POST",
                                 url=" https://cloud.google.com/vertex-ai/",
@@ -6297,6 +6318,7 @@ def exception_type(
                     )
                 elif (
                     "429 Quota exceeded" in error_str
+                    or "Quota exceeded for" in error_str
                     or "IndexError: list index out of range" in error_str
                     or "429 Unable to submit request because the service is temporarily out of capacity."
                     in error_str
@@ -6339,6 +6361,43 @@ def exception_type(
                                 ),
                             ),
                         )
+                    if original_exception.status_code == 401:
+                        exception_mapping_worked = True
+                        raise AuthenticationError(
+                            message=f"VertexAIException - {original_exception.message}",
+                            llm_provider=custom_llm_provider,
+                            model=model,
+                        )
+                    if original_exception.status_code == 404:
+                        exception_mapping_worked = True
+                        raise NotFoundError(
+                            message=f"VertexAIException - {original_exception.message}",
+                            llm_provider=custom_llm_provider,
+                            model=model,
+                        )
+                    if original_exception.status_code == 408:
+                        exception_mapping_worked = True
+                        raise Timeout(
+                            message=f"VertexAIException - {original_exception.message}",
+                            llm_provider=custom_llm_provider,
+                            model=model,
+                        )
+
+                    if original_exception.status_code == 429:
+                        exception_mapping_worked = True
+                        raise RateLimitError(
+                            message=f"litellm.RateLimitError: VertexAIException - {error_str}",
+                            model=model,
+                            llm_provider="vertex_ai",
+                            litellm_debug_info=extra_information,
+                            response=httpx.Response(
+                                status_code=429,
+                                request=httpx.Request(
+                                    method="POST",
+                                    url=" https://cloud.google.com/vertex-ai/",
+                                ),
+                            ),
+                        )
                     if original_exception.status_code == 500:
                         exception_mapping_worked = True
                         raise litellm.InternalServerError(
@@ -6351,6 +6410,13 @@ def exception_type(
                                 content=str(original_exception),
                                 request=httpx.Request(method="completion", url="https://github.com/BerriAI/litellm"),  # type: ignore
                             ),
+                        )
+                    if original_exception.status_code == 503:
+                        exception_mapping_worked = True
+                        raise ServiceUnavailableError(
+                            message=f"VertexAIException - {original_exception.message}",
+                            llm_provider=custom_llm_provider,
+                            model=model,
                         )
             elif custom_llm_provider == "palm" or custom_llm_provider == "gemini":
                 if "503 Getting metadata" in error_str:
@@ -9413,7 +9479,7 @@ def mock_completion_streaming_obj(model_response, mock_response, model):
 
 async def async_mock_completion_streaming_obj(model_response, mock_response, model):
     for i in range(0, len(mock_response), 3):
-        completion_obj = Delta(role="assistant", content=mock_response)
+        completion_obj = Delta(role="assistant", content=mock_response[i : i + 3])
         model_response.choices[0].delta = completion_obj
         model_response.choices[0].finish_reason = "stop"
         yield model_response

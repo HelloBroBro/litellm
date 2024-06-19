@@ -9,7 +9,7 @@ import types
 import uuid
 from enum import Enum
 from functools import partial
-from typing import Any, Callable, List, Literal, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import httpx  # type: ignore
 import ijson
@@ -21,6 +21,7 @@ import litellm.litellm_core_utils.litellm_logging
 from litellm import verbose_logger
 from litellm.litellm_core_utils.core_helpers import map_finish_reason
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
+from litellm.llms.prompt_templates.factory import convert_url_to_base64
 from litellm.llms.vertex_ai import _gemini_convert_messages_with_history
 from litellm.types.llms.openai import (
     ChatCompletionResponseMessage,
@@ -36,6 +37,7 @@ from litellm.types.llms.vertex_ai import (
     GenerationConfig,
     PartType,
     RequestBody,
+    SafetSettingsConfig,
     SystemInstructions,
     ToolConfig,
     Tools,
@@ -240,6 +242,20 @@ class VertexGeminiConfig:
             "europe-west9",
         ]
 
+    def get_flagged_finish_reasons(self) -> Dict[str, str]:
+        """
+        Return Dictionary of finish reasons which indicate response was flagged
+
+        and what it means
+        """
+        return {
+            "SAFETY": "The token generation was stopped as the response was flagged for safety reasons. NOTE: When streaming the Candidate.content will be empty if content filters blocked the output.",
+            "RECITATION": "The token generation was stopped as the response was flagged for unauthorized citations.",
+            "BLOCKLIST": "The token generation was stopped as the response was flagged for the terms which are included from the terminology blocklist.",
+            "PROHIBITED_CONTENT": "The token generation was stopped as the response was flagged for the prohibited contents.",
+            "SPII": "The token generation was stopped as the response was flagged for Sensitive Personally Identifiable Information (SPII) contents.",
+        }
+
 
 async def make_call(
     client: Optional[AsyncHTTPHandler],
@@ -361,58 +377,90 @@ class VertexLLM(BaseLLM):
                 status_code=422,
             )
 
+        ## CHECK IF RESPONSE FLAGGED
+        if len(completion_response["candidates"]) > 0:
+            content_policy_violations = (
+                VertexGeminiConfig().get_flagged_finish_reasons()
+            )
+            if (
+                "finishReason" in completion_response["candidates"][0]
+                and completion_response["candidates"][0]["finishReason"]
+                in content_policy_violations.keys()
+            ):
+                ## CONTENT POLICY VIOLATION ERROR
+                raise VertexAIError(
+                    status_code=400,
+                    message="The response was blocked. Reason={}. Raw Response={}".format(
+                        content_policy_violations[
+                            completion_response["candidates"][0]["finishReason"]
+                        ],
+                        completion_response,
+                    ),
+                )
+
         model_response.choices = []  # type: ignore
 
         ## GET MODEL ##
         model_response.model = model
-        ## GET TEXT ##
-        chat_completion_message: ChatCompletionResponseMessage = {"role": "assistant"}
-        content_str = ""
-        tools: List[ChatCompletionToolCallChunk] = []
-        for idx, candidate in enumerate(completion_response["candidates"]):
-            if "content" not in candidate:
-                continue
 
-            if "text" in candidate["content"]["parts"][0]:
-                content_str = candidate["content"]["parts"][0]["text"]
+        try:
+            ## GET TEXT ##
+            chat_completion_message: ChatCompletionResponseMessage = {
+                "role": "assistant"
+            }
+            content_str = ""
+            tools: List[ChatCompletionToolCallChunk] = []
+            for idx, candidate in enumerate(completion_response["candidates"]):
+                if "content" not in candidate:
+                    continue
 
-            if "functionCall" in candidate["content"]["parts"][0]:
-                _function_chunk = ChatCompletionToolCallFunctionChunk(
-                    name=candidate["content"]["parts"][0]["functionCall"]["name"],
-                    arguments=json.dumps(
-                        candidate["content"]["parts"][0]["functionCall"]["args"]
-                    ),
+                if "text" in candidate["content"]["parts"][0]:
+                    content_str = candidate["content"]["parts"][0]["text"]
+
+                if "functionCall" in candidate["content"]["parts"][0]:
+                    _function_chunk = ChatCompletionToolCallFunctionChunk(
+                        name=candidate["content"]["parts"][0]["functionCall"]["name"],
+                        arguments=json.dumps(
+                            candidate["content"]["parts"][0]["functionCall"]["args"]
+                        ),
+                    )
+                    _tool_response_chunk = ChatCompletionToolCallChunk(
+                        id=f"call_{str(uuid.uuid4())}",
+                        type="function",
+                        function=_function_chunk,
+                    )
+                    tools.append(_tool_response_chunk)
+
+                chat_completion_message["content"] = content_str
+                chat_completion_message["tool_calls"] = tools
+
+                choice = litellm.Choices(
+                    finish_reason=candidate.get("finishReason", "stop"),
+                    index=candidate.get("index", idx),
+                    message=chat_completion_message,  # type: ignore
+                    logprobs=None,
+                    enhancements=None,
                 )
-                _tool_response_chunk = ChatCompletionToolCallChunk(
-                    id=f"call_{str(uuid.uuid4())}",
-                    type="function",
-                    function=_function_chunk,
-                )
-                tools.append(_tool_response_chunk)
 
-            chat_completion_message["content"] = content_str
-            chat_completion_message["tool_calls"] = tools
+                model_response.choices.append(choice)
 
-            choice = litellm.Choices(
-                finish_reason=candidate.get("finishReason", "stop"),
-                index=candidate.get("index", idx),
-                message=chat_completion_message,  # type: ignore
-                logprobs=None,
-                enhancements=None,
+            ## GET USAGE ##
+            usage = litellm.Usage(
+                prompt_tokens=completion_response["usageMetadata"]["promptTokenCount"],
+                completion_tokens=completion_response["usageMetadata"][
+                    "candidatesTokenCount"
+                ],
+                total_tokens=completion_response["usageMetadata"]["totalTokenCount"],
             )
 
-            model_response.choices.append(choice)
-
-        ## GET USAGE ##
-        usage = litellm.Usage(
-            prompt_tokens=completion_response["usageMetadata"]["promptTokenCount"],
-            completion_tokens=completion_response["usageMetadata"][
-                "candidatesTokenCount"
-            ],
-            total_tokens=completion_response["usageMetadata"]["totalTokenCount"],
-        )
-
-        setattr(model_response, "usage", usage)
+            setattr(model_response, "usage", usage)
+        except Exception as e:
+            raise VertexAIError(
+                message="Received={}, Error converting to valid response block={}. File an issue if litellm error - https://github.com/BerriAI/litellm/issues".format(
+                    completion_response, str(e)
+                ),
+                status_code=422,
+            )
 
         return model_response
 
@@ -686,6 +734,9 @@ class VertexLLM(BaseLLM):
         content = _gemini_convert_messages_with_history(messages=messages)
         tools: Optional[Tools] = optional_params.pop("tools", None)
         tool_choice: Optional[ToolConfig] = optional_params.pop("tool_choice", None)
+        safety_settings: Optional[List[SafetSettingsConfig]] = optional_params.pop(
+            "safety_settings", None
+        )  # type: ignore
         generation_config: Optional[GenerationConfig] = GenerationConfig(
             **optional_params
         )
@@ -697,6 +748,8 @@ class VertexLLM(BaseLLM):
             data["tools"] = tools
         if tool_choice is not None:
             data["toolConfig"] = tool_choice
+        if safety_settings is not None:
+            data["safetySettings"] = safety_settings
         if generation_config is not None:
             data["generationConfig"] = generation_config
 
@@ -787,6 +840,7 @@ class VertexLLM(BaseLLM):
             client = HTTPHandler(**_params)  # type: ignore
         else:
             client = client
+
         try:
             response = client.post(url=url, headers=headers, json=data)  # type: ignore
             response.raise_for_status()

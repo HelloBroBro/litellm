@@ -127,6 +127,7 @@ response = completion(
       "trace_user_id": "user-id2",                  # set langfuse Trace User ID
       "session_id": "session-1",                    # set langfuse Session ID
       "tags": ["tag1", "tag2"],                     # set langfuse Tags
+      "trace_name": "new-trace-name"                # set langfuse Trace Name
       "trace_id": "trace-id22",                     # set langfuse Trace ID
       "trace_metadata": {"key": "value"},           # set langfuse Trace Metadata
       "trace_version": "test-trace-version",        # set langfuse Trace Version (if not set, defaults to Generation Version)
@@ -148,9 +149,10 @@ print(response)
 You can also pass `metadata` as part of the request header with a `langfuse_*` prefix:
 
 ```shell
-curl --location 'http://0.0.0.0:4000/chat/completions' \
-    --header 'Content-Type: application/json' \    
-    --header 'langfuse_trace_id: trace-id22' \
+curl --location --request POST 'http://0.0.0.0:4000/chat/completions' \
+    --header 'Content-Type: application/json' \
+    --header 'Authorization: Bearer sk-1234' \
+    --header 'langfuse_trace_id: trace-id2' \
     --header 'langfuse_trace_user_id: user-id2' \
     --header 'langfuse_trace_metadata: {"key":"value"}' \
     --data '{

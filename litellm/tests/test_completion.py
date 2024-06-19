@@ -23,7 +23,7 @@ from litellm import RateLimitError, Timeout, completion, completion_cost, embedd
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
 from litellm.llms.prompt_templates.factory import anthropic_messages_pt
 
-# litellm.num_retries =3
+# litellm.num_retries = 3
 litellm.cache = None
 litellm.success_callback = []
 user_message = "Write a short poem about the sky"
@@ -694,8 +694,10 @@ def test_completion_claude_3_base64():
             pytest.fail(f"An exception occurred - {str(e)}")
 
 
-@pytest.mark.skip(reason="issue getting wikipedia images in ci/cd")
-def test_completion_claude_3_function_plus_image():
+@pytest.mark.parametrize(
+    "model", ["gemini/gemini-1.5-flash"]  # "claude-3-sonnet-20240229",
+)
+def test_completion_function_plus_image(model):
     litellm.set_verbose = True
 
     image_content = [
@@ -703,7 +705,7 @@ def test_completion_claude_3_function_plus_image():
         {
             "type": "image_url",
             "image_url": {
-                "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+                "url": "https://litellm-listing.s3.amazonaws.com/litellm_logo.png"
             },
         },
     ]
@@ -719,7 +721,7 @@ def test_completion_claude_3_function_plus_image():
                     "type": "object",
                     "properties": {
                         "location": {
-                            "type": "text",
+                            "type": "string",
                             "description": "The city and state, e.g. San Francisco, CA",
                         },
                         "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
@@ -739,7 +741,7 @@ def test_completion_claude_3_function_plus_image():
     ]
 
     response = completion(
-        model="claude-3-sonnet-20240229",
+        model=model,
         messages=[image_message],
         tool_choice=tool_choice,
         tools=tools,
@@ -3355,17 +3357,54 @@ def test_completion_ai21():
 # test_completion_ai21()
 # test_completion_ai21()
 ## test deep infra
-def test_completion_deep_infra():
+@pytest.mark.parametrize("drop_params", [True, False])
+def test_completion_deep_infra(drop_params):
     litellm.set_verbose = False
     model_name = "deepinfra/meta-llama/Llama-2-70b-chat-hf"
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_current_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "The city and state, e.g. San Francisco, CA",
+                        },
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+                    },
+                    "required": ["location"],
+                },
+            },
+        }
+    ]
+    messages = [
+        {
+            "role": "user",
+            "content": "What's the weather like in Boston today in Fahrenheit?",
+        }
+    ]
     try:
         response = completion(
-            model=model_name, messages=messages, temperature=0, max_tokens=10
+            model=model_name,
+            messages=messages,
+            temperature=0,
+            max_tokens=10,
+            tools=tools,
+            tool_choice={
+                "type": "function",
+                "function": {"name": "get_current_weather"},
+            },
+            drop_params=drop_params,
         )
         # Add any assertions here to check the response
         print(response)
     except Exception as e:
-        pytest.fail(f"Error occurred: {e}")
+        if drop_params is True:
+            pytest.fail(f"Error occurred: {e}")
 
 
 # test_completion_deep_infra()
@@ -3409,7 +3448,28 @@ def test_completion_gemini(model):
         {"role": "user", "content": "Hey, how's it going?"},
     ]
     try:
-        response = completion(model=model_name, messages=messages)
+        response = completion(
+            model=model_name,
+            messages=messages,
+            safety_settings=[
+                {
+                    "category": "HARM_CATEGORY_HARASSMENT",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_HATE_SPEECH",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "threshold": "BLOCK_NONE",
+                },
+            ],
+        )
         # Add any assertions,here to check the response
         print(response)
         assert response.choices[0]["index"] == 0
