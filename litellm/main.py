@@ -1079,6 +1079,90 @@ def completion(
                     },
                 )
         elif (
+            custom_llm_provider == "text-completion-openai"
+            or "ft:babbage-002" in model
+            or "ft:davinci-002" in model  # support for finetuned completion models
+        ):
+            openai.api_type = "openai"
+
+            api_base = (
+                api_base
+                or litellm.api_base
+                or get_secret("OPENAI_API_BASE")
+                or "https://api.openai.com/v1"
+            )
+
+            openai.api_version = None
+            # set API KEY
+
+            api_key = (
+                api_key
+                or litellm.api_key
+                or litellm.openai_key
+                or get_secret("OPENAI_API_KEY")
+            )
+
+            headers = headers or litellm.headers
+
+            ## LOAD CONFIG - if set
+            config = litellm.OpenAITextCompletionConfig.get_config()
+            for k, v in config.items():
+                if (
+                    k not in optional_params
+                ):  # completion(top_k=3) > openai_text_config(top_k=3) <- allows for dynamic variables to be passed in
+                    optional_params[k] = v
+            if litellm.organization:
+                openai.organization = litellm.organization
+
+            if (
+                len(messages) > 0
+                and "content" in messages[0]
+                and type(messages[0]["content"]) == list
+            ):
+                # text-davinci-003 can accept a string or array, if it's an array, assume the array is set in messages[0]['content']
+                # https://platform.openai.com/docs/api-reference/completions/create
+                prompt = messages[0]["content"]
+            else:
+                prompt = " ".join([message["content"] for message in messages])  # type: ignore
+
+            ## COMPLETION CALL
+            _response = openai_text_completions.completion(
+                model=model,
+                messages=messages,
+                model_response=model_response,
+                print_verbose=print_verbose,
+                api_key=api_key,
+                api_base=api_base,
+                acompletion=acompletion,
+                client=client,  # pass AsyncOpenAI, OpenAI client
+                logging_obj=logging,
+                optional_params=optional_params,
+                litellm_params=litellm_params,
+                logger_fn=logger_fn,
+                timeout=timeout,  # type: ignore
+            )
+
+            if (
+                optional_params.get("stream", False) == False
+                and acompletion == False
+                and text_completion == False
+            ):
+                # convert to chat completion response
+                _response = litellm.OpenAITextCompletionConfig().convert_to_chat_model_response_object(
+                    response_object=_response, model_response_object=model_response
+                )
+
+            if optional_params.get("stream", False) or acompletion == True:
+                ## LOGGING
+                logging.post_call(
+                    input=messages,
+                    api_key=api_key,
+                    original_response=_response,
+                    additional_args={"headers": headers},
+                )
+            response = _response
+
+        elif (
             model in litellm.open_ai_chat_completion_models
             or custom_llm_provider == "custom_openai"
             or custom_llm_provider == "deepinfra"
@@ -1164,89 +1248,6 @@ def completion(
                     original_response=response,
                     additional_args={"headers": headers},
                 )
-        elif (
-            custom_llm_provider == "text-completion-openai"
-            or "ft:babbage-002" in model
-            or "ft:davinci-002" in model  # support for finetuned completion models
-        ):
-            openai.api_type = "openai"
-
-            api_base = (
-                api_base
-                or litellm.api_base
-                or get_secret("OPENAI_API_BASE")
-                or "https://api.openai.com/v1"
-            )
-
-            openai.api_version = None
-            # set API KEY
-
-            api_key = (
-                api_key
-                or litellm.api_key
-                or litellm.openai_key
-                or get_secret("OPENAI_API_KEY")
-            )
-
-            headers = headers or litellm.headers
-
-            ## LOAD CONFIG - if set
-            config = litellm.OpenAITextCompletionConfig.get_config()
-            for k, v in config.items():
-                if (
-                    k not in optional_params
-                ):  # completion(top_k=3) > openai_text_config(top_k=3) <- allows for dynamic variables to be passed in
-                    optional_params[k] = v
-            if litellm.organization:
-                openai.organization = litellm.organization
-
-            if (
-                len(messages) > 0
-                and "content" in messages[0]
-                and type(messages[0]["content"]) == list
-            ):
-                # text-davinci-003 can accept a string or array, if it's an array, assume the array is set in messages[0]['content']
-                # https://platform.openai.com/docs/api-reference/completions/create
-                prompt = messages[0]["content"]
-            else:
-                prompt = " ".join([message["content"] for message in messages])  # type: ignore
-
-            ## COMPLETION CALL
-            _response = openai_text_completions.completion(
-                model=model,
-                messages=messages,
-                model_response=model_response,
-                print_verbose=print_verbose,
-                api_key=api_key,
-                api_base=api_base,
-                acompletion=acompletion,
-                client=client,  # pass AsyncOpenAI, OpenAI client
-                logging_obj=logging,
-                optional_params=optional_params,
-                litellm_params=litellm_params,
-                logger_fn=logger_fn,
-                timeout=timeout,  # type: ignore
-            )
-
-            if (
-                optional_params.get("stream", False) == False
-                and acompletion == False
-                and text_completion == False
-            ):
-                # convert to chat completion response
-                _response = litellm.OpenAITextCompletionConfig().convert_to_chat_model_response_object(
-                    response_object=_response, model_response_object=model_response
-                )
-
-            if optional_params.get("stream", False) or acompletion == True:
-                ## LOGGING
-                logging.post_call(
-                    input=messages,
-                    api_key=api_key,
-                    original_response=_response,
-                    additional_args={"headers": headers},
-                )
-            response = _response
         elif (
             "replicate" in model
             or custom_llm_provider == "replicate"
@@ -3780,6 +3781,12 @@ def text_completion(
         )
 
     kwargs.pop("prompt", None)
+
+    if model is not None and model.startswith(
+        "openai/"
+    ):  # for openai compatible endpoints - e.g. vllm, call the native /v1/completions endpoint for text completion calls
+        model = model.replace("openai/", "text-completion-openai/")
+
     kwargs["text_completion"] = True
     response = completion(
         model=model,
@@ -3942,6 +3949,7 @@ def image_generation(
         proxy_server_request = kwargs.get("proxy_server_request", None)
         model_info = kwargs.get("model_info", None)
         metadata = kwargs.get("metadata", {})
+        client = kwargs.get("client", None)
 
         model_response = litellm.utils.ImageResponse()
         if model is not None or custom_llm_provider is not None:
@@ -4080,6 +4088,7 @@ def image_generation(
                 model_response=model_response,
                 api_version=api_version,
                 aimg_generation=aimg_generation,
+                client=client,
             )
         elif custom_llm_provider == "openai":
             model_response = openai_chat_completions.image_generation(
@@ -4092,6 +4101,7 @@ def image_generation(
                 optional_params=optional_params,
                 model_response=model_response,
                 aimg_generation=aimg_generation,
+                client=client,
             )
         elif custom_llm_provider == "bedrock":
             if model is None:

@@ -280,7 +280,7 @@ async def test_langfuse_masked_input_output(langfuse_client):
 
 
 @pytest.mark.asyncio
-async def test_aaalangfuse_logging_metadata(langfuse_client):
+async def test_alangfuse_logging_metadata(langfuse_client):
     """
     Test that creates multiple traces, with a varying number of generations and sets various metadata fields
     Confirms that no metadata that is standard within Langfuse is duplicated in the respective trace or generation metadata
@@ -869,12 +869,11 @@ async def test_make_request():
     )
 
 
-def test_aaalangfuse_dynamic_logging():
+def test_alangfuse_dynamic_logging():
     """
     pass in langfuse credentials via completion call
 
     assert call is logged.
-
     Covers the team-logging scenario.
     """
     import uuid
@@ -888,6 +887,7 @@ def test_aaalangfuse_dynamic_logging():
         mock_response="Hey! how's it going?",
         langfuse_public_key=os.getenv("LANGFUSE_PROJECT2_PUBLIC"),
         langfuse_secret_key=os.getenv("LANGFUSE_PROJECT2_SECRET"),
+        langfuse_host="https://us.cloud.langfuse.com",
         metadata={"trace_id": trace_id},
         success_callback=["langfuse"],
     )
@@ -897,6 +897,7 @@ def test_aaalangfuse_dynamic_logging():
     langfuse_client = langfuse.Langfuse(
         public_key=os.getenv("LANGFUSE_PROJECT2_PUBLIC"),
         secret_key=os.getenv("LANGFUSE_PROJECT2_SECRET"),
+        host="https://us.cloud.langfuse.com",
     )
 
     langfuse_client.get_trace(id=trace_id)
