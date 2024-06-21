@@ -362,8 +362,9 @@ async def test_aaalangfuse_logging_metadata(langfuse_client):
             print(response)
             metadata["existing_trace_id"] = trace_id
 
+            await asyncio.sleep(2)
     langfuse_client.flush()
-    await asyncio.sleep(10)
+    # await asyncio.sleep(10)
 
     # Tests the metadata filtering and the override of the output to be the last generation
     for trace_id, generation_ids in trace_identifiers.items():
@@ -869,6 +870,9 @@ async def test_make_request():
     )
 
 
+@pytest.mark.skip(
+    reason="local only test, use this to verify if dynamic langfuse logging works as expected"
+)
 def test_aaalangfuse_dynamic_logging():
     """
     pass in langfuse credentials via completion call
@@ -892,7 +896,7 @@ def test_aaalangfuse_dynamic_logging():
         success_callback=["langfuse"],
     )
 
-    time.sleep(1)
+    time.sleep(3)
 
     langfuse_client = langfuse.Langfuse(
         public_key=os.getenv("LANGFUSE_PROJECT2_PUBLIC"),

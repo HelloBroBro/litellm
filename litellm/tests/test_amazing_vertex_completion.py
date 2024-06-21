@@ -42,7 +42,6 @@ def get_vertex_ai_creds_json() -> dict:
     print("loading vertex ai credentials")
     filepath = os.path.dirname(os.path.abspath(__file__))
     vertex_key_path = filepath + "/vertex_key.json"
-
     # Read the existing content of the file or create an empty dictionary
     try:
         with open(vertex_key_path, "r") as file:
@@ -852,6 +851,40 @@ Using this JSON schema:
             pass
 
         mock_call.assert_called_once()
+
+
+@pytest.mark.parametrize("provider", ["vertex_ai_beta"])  # "vertex_ai",
+@pytest.mark.asyncio
+async def test_gemini_pro_httpx_custom_api_base(provider):
+    load_vertex_ai_credentials()
+    litellm.set_verbose = True
+    messages = [
+        {
+            "role": "user",
+            "content": "Hello world",
+        }
+    ]
+    from litellm.llms.custom_httpx.http_handler import HTTPHandler
+
+    client = HTTPHandler()
+
+    with patch.object(client, "post", new=MagicMock()) as mock_call:
+        try:
+            response = completion(
+                model="vertex_ai_beta/gemini-1.5-flash",
+                messages=messages,
+                response_format={"type": "json_object"},
+                client=client,
+                api_base="my-custom-api-base",
+                extra_headers={"hello": "world"},
+            )
+        except Exception as e:
+            pass
+
+        mock_call.assert_called_once()
+
+        assert "my-custom-api-base:generateContent" == mock_call.call_args.kwargs["url"]
+        assert "hello" in mock_call.call_args.kwargs["headers"]
 
 
 @pytest.mark.skip(reason="exhausted vertex quota. need to refactor to mock the call")
