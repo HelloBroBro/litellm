@@ -1180,7 +1180,7 @@ def completion(
             # note: if a user sets a custom base - we should ensure this works
             # allow for the setting of dynamic and stateful api-bases
             api_base = (
-                api_base  # for deepinfra/perplexity/anyscale/groq we check in get_llm_provider and pass in the api base from there
+                api_base  # for deepinfra/perplexity/anyscale/groq/friendliai we check in get_llm_provider and pass in the api base from there
                 or litellm.api_base
                 or get_secret("OPENAI_API_BASE")
                 or "https://api.openai.com/v1"
@@ -1194,7 +1194,7 @@ def completion(
             # set API KEY
             api_key = (
                 api_key
-                or litellm.api_key  # for deepinfra/perplexity/anyscale we check in get_llm_provider and pass in the api key from there
+                or litellm.api_key  # for deepinfra/perplexity/anyscale/friendliai we check in get_llm_provider and pass in the api key from there
                 or litellm.openai_key
                 or get_secret("OPENAI_API_KEY")
             )
@@ -3852,14 +3852,20 @@ def moderation(
 
 
 @client
-async def amoderation(input: str, model: str, api_key: Optional[str] = None, **kwargs):
+async def amoderation(
+    input: str, model: Optional[str] = None, api_key: Optional[str] = None, **kwargs
+):
     # only supports open ai for now
     api_key = (
         api_key or litellm.api_key or litellm.openai_key or get_secret("OPENAI_API_KEY")
     )
     openai_client = kwargs.get("client", None)
     if openai_client is None:
-        openai_client = openai.AsyncOpenAI(
+
+        # call helper to get OpenAI client
+        # _get_openai_client maintains in-memory caching logic for OpenAI clients
+        openai_client = openai_chat_completions._get_openai_client(
+            is_async=True,
             api_key=api_key,
         )
     response = await openai_client.moderations.create(input=input, model=model)
@@ -4401,7 +4407,7 @@ def speech(
     response: Optional[HttpxBinaryResponseContent] = None
     if custom_llm_provider == "openai":
         api_base = (
-            api_base  # for deepinfra/perplexity/anyscale/groq we check in get_llm_provider and pass in the api base from there
+            api_base  # for deepinfra/perplexity/anyscale/groq/friendliai we check in get_llm_provider and pass in the api base from there
             or litellm.api_base
             or get_secret("OPENAI_API_BASE")
             or "https://api.openai.com/v1"

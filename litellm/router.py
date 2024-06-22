@@ -393,7 +393,11 @@ class Router:
         else:
             litellm.failure_callback = [self.deployment_callback_on_failure]
         print(  # noqa
-            f"Intialized router with Routing strategy: {self.routing_strategy}\n\nRouting fallbacks: {self.fallbacks}\n\nRouting context window fallbacks: {self.context_window_fallbacks}\n\nRouter Redis Caching={self.cache.redis_cache}"
+            f"Intialized router with Routing strategy: {self.routing_strategy}\n\n"
+            f"Routing fallbacks: {self.fallbacks}\n\n"
+            f"Routing content fallbacks: {self.content_policy_fallbacks}\n\n"
+            f"Routing context window fallbacks: {self.context_window_fallbacks}\n\n"
+            f"Router Redis Caching={self.cache.redis_cache}\n"
         )  # noqa
         self.routing_strategy_args = routing_strategy_args
         self.retry_policy: Optional[RetryPolicy] = retry_policy
@@ -3090,7 +3094,7 @@ class Router:
             if not, add it - https://github.com/BerriAI/litellm/issues/2279
             """
             if (
-                is_azure_ai_studio_model == True
+                is_azure_ai_studio_model is True
                 and api_base is not None
                 and isinstance(api_base, str)
                 and not api_base.endswith("/v1/")
@@ -3174,7 +3178,7 @@ class Router:
                 organization = litellm.get_secret(organization_env_name)
                 litellm_params["organization"] = organization
 
-            if "azure" in model_name:
+            if custom_llm_provider == "azure" or custom_llm_provider == "azure_text":
                 if api_base is None or not isinstance(api_base, str):
                     filtered_litellm_params = {
                         k: v

@@ -2710,6 +2710,16 @@ def get_optional_params(
         print_verbose(
             f"(end) INSIDE THE VERTEX AI OPTIONAL PARAM BLOCK - optional_params: {optional_params}"
         )
+    elif custom_llm_provider == "gemini":
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
+        _check_valid_arg(supported_params=supported_params)
+        optional_params = litellm.GoogleAIStudioGeminiConfig().map_openai_params(
+            non_default_params=non_default_params,
+            optional_params=optional_params,
+            model=model,
+        )
     elif custom_llm_provider == "vertex_ai_beta" or custom_llm_provider == "gemini":
         supported_params = get_supported_openai_params(
             model=model, custom_llm_provider=custom_llm_provider
@@ -3265,7 +3275,11 @@ def get_optional_params(
             optional_params["top_logprobs"] = top_logprobs
         if extra_headers is not None:
             optional_params["extra_headers"] = extra_headers
-    if custom_llm_provider in ["openai", "azure"] + litellm.openai_compatible_providers:
+    if (
+        custom_llm_provider
+        in ["openai", "azure", "text-completion-openai"]
+        + litellm.openai_compatible_providers
+    ):
         # for openai, azure we should pass the extra/passed params within `extra_body` https://github.com/openai/openai-python/blob/ac33853ba10d13ac149b1fa3ca6dba7d613065c9/src/openai/resources/models.py#L46
         extra_body = passed_params.pop("extra_body", {})
         for k in passed_params.keys():
@@ -3742,7 +3756,7 @@ def get_supported_openai_params(
         elif request_type == "embeddings":
             return litellm.DatabricksEmbeddingConfig().get_supported_openai_params()
     elif custom_llm_provider == "palm" or custom_llm_provider == "gemini":
-        return litellm.VertexAIConfig().get_supported_openai_params()
+        return litellm.GoogleAIStudioGeminiConfig().get_supported_openai_params()
     elif custom_llm_provider == "vertex_ai":
         if request_type == "chat_completion":
             return litellm.VertexAIConfig().get_supported_openai_params()
@@ -4019,6 +4033,11 @@ def get_llm_provider(
                     or get_secret("TOGETHERAI_API_KEY")
                     or get_secret("TOGETHER_AI_TOKEN")
                 )
+            elif custom_llm_provider == "friendliai":
+                api_base = "https://inference.friendli.ai/v1"
+                dynamic_api_key = get_secret("FRIENDLIAI_API_KEY") or get_secret(
+                    "FRIENDLI_TOKEN"
+                )
             if api_base is not None and not isinstance(api_base, str):
                 raise Exception(
                     "api base needs to be a string. api_base={}".format(api_base)
@@ -4072,6 +4091,11 @@ def get_llm_provider(
                     elif endpoint == "api.deepseek.com/v1":
                         custom_llm_provider = "deepseek"
                         dynamic_api_key = get_secret("DEEPSEEK_API_KEY")
+                    elif endpoint == "inference.friendli.ai/v1":
+                        custom_llm_provider = "friendliai"
+                        dynamic_api_key = get_secret(
+                            "FRIENDLIAI_API_KEY"
+                        ) or get_secret("FRIENDLI_TOKEN")
 
                     if api_base is not None and not isinstance(api_base, str):
                         raise Exception(
@@ -5898,21 +5922,28 @@ def exception_type(
                 if "prompt is too long" in error_str or "prompt: length" in error_str:
                     exception_mapping_worked = True
                     raise ContextWindowExceededError(
-                        message=error_str,
+                        message="AnthropicError - {}".format(error_str),
                         model=model,
                         llm_provider="anthropic",
                     )
                 if "Invalid API Key" in error_str:
                     exception_mapping_worked = True
                     raise AuthenticationError(
-                        message=error_str,
+                        message="AnthropicError - {}".format(error_str),
                         model=model,
                         llm_provider="anthropic",
                     )
                 if "content filtering policy" in error_str:
                     exception_mapping_worked = True
                     raise ContentPolicyViolationError(
-                        message=error_str,
+                        message="AnthropicError - {}".format(error_str),
+                        model=model,
+                        llm_provider="anthropic",
+                    )
+                if "Client error '400 Bad Request'" in error_str:
+                    exception_mapping_worked = True
+                    raise BadRequestError(
+                        message="AnthropicError - {}".format(error_str),
                         model=model,
                         llm_provider="anthropic",
                     )
@@ -5924,7 +5955,6 @@ def exception_type(
                             message=f"AnthropicException - {error_str}",
                             llm_provider="anthropic",
                             model=model,
-                            response=original_exception.response,
                         )
                     elif (
                         original_exception.status_code == 400
@@ -5935,7 +5965,13 @@ def exception_type(
                             message=f"AnthropicException - {error_str}",
                             model=model,
                             llm_provider="anthropic",
-                            response=original_exception.response,
+                        )
+                    elif original_exception.status_code == 404:
+                        exception_mapping_worked = True
+                        raise NotFoundError(
+                            message=f"AnthropicException - {error_str}",
+                            model=model,
+                            llm_provider="anthropic",
                         )
                     elif original_exception.status_code == 408:
                         exception_mapping_worked = True
@@ -5950,16 +5986,20 @@ def exception_type(
                             message=f"AnthropicException - {error_str}",
                             llm_provider="anthropic",
                             model=model,
-                            response=original_exception.response,
                         )
                     elif original_exception.status_code == 500:
                         exception_mapping_worked = True
-                        raise APIError(
-                            status_code=500,
-                            message=f"AnthropicException - {error_str}. Handle with `litellm.APIError`.",
+                        raise litellm.InternalServerError(
+                            message=f"AnthropicException - {error_str}. Handle with `litellm.InternalServerError`.",
                             llm_provider="anthropic",
                             model=model,
-                            request=original_exception.request,
+                        )
+                    elif original_exception.status_code == 503:
+                        exception_mapping_worked = True
+                        raise litellm.ServiceUnavailableError(
+                            message=f"AnthropicException - {error_str}. Handle with `litellm.ServiceUnavailableError`.",
+                            llm_provider="anthropic",
+                            model=model,
                         )
             elif custom_llm_provider == "replicate":
                 if "Incorrect authentication token" in error_str:
@@ -7151,6 +7191,7 @@ def exception_type(
                         in error_str
                     )
                     or "Your task failed as a result of our safety system" in error_str
+                    or "The model produced invalid content" in error_str
                 ):
                     exception_mapping_worked = True
                     raise ContentPolicyViolationError(
