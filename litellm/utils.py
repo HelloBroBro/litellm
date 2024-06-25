@@ -5914,6 +5914,7 @@ def exception_type(
                         )
                 else:
                     # if no status code then it is an APIConnectionError: https://github.com/openai/openai-python#handling-errors
+                    # exception_mapping_worked = True
                     raise APIConnectionError(
                         message=f"APIConnectionError: {exception_provider} - {message}",
                         llm_provider=custom_llm_provider,
@@ -6066,6 +6067,14 @@ def exception_type(
                             message=f"ReplicateException - {original_exception.message}",
                             model=model,
                             llm_provider="replicate",
+                        )
+                    elif original_exception.status_code == 422:
+                        exception_mapping_worked = True
+                        raise UnprocessableEntityError(
+                            message=f"ReplicateException - {original_exception.message}",
+                            llm_provider="replicate",
+                            model=model,
+                            response=original_exception.response,
                         )
                     elif original_exception.status_code == 429:
                         exception_mapping_worked = True
@@ -7460,6 +7469,9 @@ def exception_type(
         if exception_mapping_worked:
             raise e
         else:
+            for error_type in litellm.LITELLM_EXCEPTION_TYPES:
+                if isinstance(e, error_type):
+                    raise e  # it's already mapped
             raise APIConnectionError(
                 message="{}\n{}".format(original_exception, traceback.format_exc()),
                 llm_provider="",
