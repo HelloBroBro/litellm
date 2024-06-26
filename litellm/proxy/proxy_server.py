@@ -140,6 +140,7 @@ from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
 
 ## Import All Misc routes here ##
 from litellm.proxy.caching_routes import router as caching_router
+from litellm.proxy.common_utils.debug_utils import router as debugging_endpoints_router
 from litellm.proxy.common_utils.http_parsing_utils import _read_request_body
 from litellm.proxy.health_check import perform_health_check
 from litellm.proxy.health_endpoints._health_endpoints import router as health_router
@@ -1478,6 +1479,21 @@ class ProxyConfig:
 
                                 llama_guard_object = _ENTERPRISE_LlamaGuard()
                                 imported_list.append(llama_guard_object)
+                            elif (
+                                isinstance(callback, str) and callback == "hide_secrets"
+                            ):
+                                from enterprise.enterprise_hooks.secret_detection import (
+                                    _ENTERPRISE_SecretDetection,
+                                )
+
+                                if premium_user != True:
+                                    raise Exception(
+                                        "Trying to use secret hiding"
+                                        + CommonProxyErrors.not_premium_user.value
+                                    )
+
+                                _secret_detection_object = _ENTERPRISE_SecretDetection()
+                                imported_list.append(_secret_detection_object)
                             elif (
                                 isinstance(callback, str)
                                 and callback == "openai_moderations"
@@ -9167,3 +9183,4 @@ app.include_router(team_router)
 app.include_router(spend_management_router)
 app.include_router(caching_router)
 app.include_router(analytics_router)
+app.include_router(debugging_endpoints_router)
