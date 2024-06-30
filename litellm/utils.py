@@ -48,8 +48,10 @@ from tokenizers import Tokenizer
 import litellm
 import litellm._service_logger  # for storing API inputs, outputs, and metadata
 import litellm.litellm_core_utils
+import litellm.litellm_core_utils.json_validation_rule
 from litellm.caching import DualCache
 from litellm.litellm_core_utils.core_helpers import map_finish_reason
+from litellm.litellm_core_utils.exception_mapping_utils import get_error_message
 from litellm.litellm_core_utils.llm_request_utils import _ensure_extra_body_is_safe
 from litellm.litellm_core_utils.redact_messages import (
     redact_message_input_output_from_logging,
@@ -579,7 +581,7 @@ def client(original_function):
         else:
             return False
 
-    def post_call_processing(original_response, model):
+    def post_call_processing(original_response, model, optional_params: Optional[dict]):
         try:
             if original_response is None:
                 pass
@@ -594,11 +596,47 @@ def client(original_function):
                         pass
                     else:
                         if isinstance(original_response, ModelResponse):
-                            model_response = original_response.choices[
+                            model_response: Optional[str] = original_response.choices[
                                 0
-                            ].message.content
-                            ### POST-CALL RULES ###
-                            rules_obj.post_call_rules(input=model_response, model=model)
+                            ].message.content  # type: ignore
+                            if model_response is not None:
+                                ### POST-CALL RULES ###
+                                rules_obj.post_call_rules(
+                                    input=model_response, model=model
+                                )
+                                ### JSON SCHEMA VALIDATION ###
+                                if (
+                                    optional_params is not None
+                                    and "response_format" in optional_params
+                                    and isinstance(
+                                        optional_params["response_format"], dict
+                                    )
+                                    and "type" in optional_params["response_format"]
+                                    and optional_params["response_format"]["type"]
+                                    == "json_object"
+                                    and "response_schema"
+                                    in optional_params["response_format"]
+                                    and isinstance(
+                                        optional_params["response_format"][
+                                            "response_schema"
+                                        ],
+                                        dict,
+                                    )
+                                    and "enforce_validation"
+                                    in optional_params["response_format"]
+                                    and optional_params["response_format"][
+                                        "enforce_validation"
+                                    ]
+                                    is True
+                                ):
+                                    # schema given, json response expected, and validation enforced
+                                    litellm.litellm_core_utils.json_validation_rule.validate_schema(
+                                        schema=optional_params["response_format"][
+                                            "response_schema"
+                                        ],
+                                        response=model_response,
+                                    )
+
         except Exception as e:
             raise e
 
@@ -867,7 +905,11 @@ def client(original_function):
                 return result
 
             ### POST-CALL RULES ###
-            post_call_processing(original_response=result, model=model or None)
+            post_call_processing(
+                original_response=result,
+                model=model or None,
+                optional_params=kwargs,
+            )
 
             # [OPTIONAL] ADD TO CACHE
             if (
@@ -1316,7 +1358,9 @@ def client(original_function):
                 ).total_seconds() * 1000  # return response latency in ms like openai
 
             ### POST-CALL RULES ###
-            post_call_processing(original_response=result, model=model)
+            post_call_processing(
+                original_response=result, model=model, optional_params=kwargs
+            )
 
             # [OPTIONAL] ADD TO CACHE
             if (
@@ -1847,9 +1891,10 @@ def supports_system_messages(model: str, custom_llm_provider: Optional[str]) -> 
 
     Parameters:
     model (str): The model name to be checked.
+    custom_llm_provider (str): The provider to be checked.
 
     Returns:
-    bool: True if the model supports function calling, False otherwise.
+    bool: True if the model supports system messages, False otherwise.
 
     Raises:
     Exception: If the given model is not found in model_prices_and_context_window.json.
@@ -1865,6 +1910,43 @@ def supports_system_messages(model: str, custom_llm_provider: Optional[str]) -> 
         raise Exception(
             f"Model not in model_prices_and_context_window.json. You passed model={model}, custom_llm_provider={custom_llm_provider}."
         )
+
+
+def supports_response_schema(model: str, custom_llm_provider: Optional[str]) -> bool:
+    """
+    Check if the given model + provider supports 'response_schema' as a param.
+
+    Parameters:
+    model (str): The model name to be checked.
+    custom_llm_provider (str): The provider to be checked.
+
+    Returns:
+    bool: True if the model supports response_schema, False otherwise.
+
+    Does not raise error. Defaults to 'False'. Outputs logging.error.
+    """
+    try:
+        ## GET LLM PROVIDER ##
+        model, custom_llm_provider, _, _ = get_llm_provider(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
+
+        if custom_llm_provider == "predibase":  # predibase supports this globally
+            return True
+
+        ## GET MODEL INFO
+        model_info = litellm.get_model_info(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
+
+        if model_info.get("supports_response_schema", False) is True:
+            return True
+        return False
+    except Exception:
+        verbose_logger.error(
+            f"Model not in model_prices_and_context_window.json. You passed model={model}, custom_llm_provider={custom_llm_provider}."
+        )
+        return False
 
 
 def supports_function_calling(model: str) -> bool:
@@ -2756,6 +2838,11 @@ def get_optional_params(
             non_default_params=non_default_params,
             optional_params=optional_params,
             model=model,
+            drop_params=(
+                drop_params
+                if drop_params is not None and isinstance(drop_params, bool)
+                else False
+            ),
         )
     elif (
         custom_llm_provider == "vertex_ai" and model in litellm.vertex_anthropic_models
@@ -2824,12 +2911,7 @@ def get_optional_params(
                             optional_params=optional_params,
                         )
                     )
-                else:
-                    optional_params = litellm.AmazonAnthropicConfig().map_openai_params(
-                        non_default_params=non_default_params,
-                        optional_params=optional_params,
-                    )
-            else:  # bedrock httpx route
+            elif model in litellm.BEDROCK_CONVERSE_MODELS:
                 optional_params = litellm.AmazonConverseConfig().map_openai_params(
                     model=model,
                     non_default_params=non_default_params,
@@ -2839,6 +2921,11 @@ def get_optional_params(
                         if drop_params is not None and isinstance(drop_params, bool)
                         else False
                     ),
+                )
+            else:
+                optional_params = litellm.AmazonAnthropicConfig().map_openai_params(
+                    non_default_params=non_default_params,
+                    optional_params=optional_params,
                 )
         elif "amazon" in model:  # amazon titan llms
             _check_valid_arg(supported_params=supported_params)
@@ -4429,8 +4516,7 @@ def get_max_tokens(model: str) -> Optional[int]:
 
 def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> ModelInfo:
     """
-    Get a dict for the maximum tokens (context window),
-    input_cost_per_token, output_cost_per_token  for a given model.
+    Get a dict for the maximum tokens (context window), input_cost_per_token, output_cost_per_token  for a given model.
 
     Parameters:
     - model (str): The name of the model.
@@ -4515,6 +4601,7 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
                 mode="chat",
                 supported_openai_params=supported_openai_params,
                 supports_system_messages=None,
+                supports_response_schema=None,
             )
         else:
             """
@@ -4536,36 +4623,6 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
                         pass
                     else:
                         raise Exception
-                return ModelInfo(
-                    max_tokens=_model_info.get("max_tokens", None),
-                    max_input_tokens=_model_info.get("max_input_tokens", None),
-                    max_output_tokens=_model_info.get("max_output_tokens", None),
-                    input_cost_per_token=_model_info.get("input_cost_per_token", 0),
-                    input_cost_per_character=_model_info.get(
-                        "input_cost_per_character", None
-                    ),
-                    input_cost_per_token_above_128k_tokens=_model_info.get(
-                        "input_cost_per_token_above_128k_tokens", None
-                    ),
-                    output_cost_per_token=_model_info.get("output_cost_per_token", 0),
-                    output_cost_per_character=_model_info.get(
-                        "output_cost_per_character", None
-                    ),
-                    output_cost_per_token_above_128k_tokens=_model_info.get(
-                        "output_cost_per_token_above_128k_tokens", None
-                    ),
-                    output_cost_per_character_above_128k_tokens=_model_info.get(
-                        "output_cost_per_character_above_128k_tokens", None
-                    ),
-                    litellm_provider=_model_info.get(
-                        "litellm_provider", custom_llm_provider
-                    ),
-                    mode=_model_info.get("mode"),
-                    supported_openai_params=supported_openai_params,
-                    supports_system_messages=_model_info.get(
-                        "supports_system_messages", None
-                    ),
-                )
             elif model in litellm.model_cost:
                 _model_info = litellm.model_cost[model]
                 _model_info["supported_openai_params"] = supported_openai_params
@@ -4579,36 +4636,6 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
                         pass
                     else:
                         raise Exception
-                return ModelInfo(
-                    max_tokens=_model_info.get("max_tokens", None),
-                    max_input_tokens=_model_info.get("max_input_tokens", None),
-                    max_output_tokens=_model_info.get("max_output_tokens", None),
-                    input_cost_per_token=_model_info.get("input_cost_per_token", 0),
-                    input_cost_per_character=_model_info.get(
-                        "input_cost_per_character", None
-                    ),
-                    input_cost_per_token_above_128k_tokens=_model_info.get(
-                        "input_cost_per_token_above_128k_tokens", None
-                    ),
-                    output_cost_per_token=_model_info.get("output_cost_per_token", 0),
-                    output_cost_per_character=_model_info.get(
-                        "output_cost_per_character", None
-                    ),
-                    output_cost_per_token_above_128k_tokens=_model_info.get(
-                        "output_cost_per_token_above_128k_tokens", None
-                    ),
-                    output_cost_per_character_above_128k_tokens=_model_info.get(
-                        "output_cost_per_character_above_128k_tokens", None
-                    ),
-                    litellm_provider=_model_info.get(
-                        "litellm_provider", custom_llm_provider
-                    ),
-                    mode=_model_info.get("mode"),
-                    supported_openai_params=supported_openai_params,
-                    supports_system_messages=_model_info.get(
-                        "supports_system_messages", None
-                    ),
-                )
             elif split_model in litellm.model_cost:
                 _model_info = litellm.model_cost[split_model]
                 _model_info["supported_openai_params"] = supported_openai_params
@@ -4622,40 +4649,48 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
                         pass
                     else:
                         raise Exception
-                return ModelInfo(
-                    max_tokens=_model_info.get("max_tokens", None),
-                    max_input_tokens=_model_info.get("max_input_tokens", None),
-                    max_output_tokens=_model_info.get("max_output_tokens", None),
-                    input_cost_per_token=_model_info.get("input_cost_per_token", 0),
-                    input_cost_per_character=_model_info.get(
-                        "input_cost_per_character", None
-                    ),
-                    input_cost_per_token_above_128k_tokens=_model_info.get(
-                        "input_cost_per_token_above_128k_tokens", None
-                    ),
-                    output_cost_per_token=_model_info.get("output_cost_per_token", 0),
-                    output_cost_per_character=_model_info.get(
-                        "output_cost_per_character", None
-                    ),
-                    output_cost_per_token_above_128k_tokens=_model_info.get(
-                        "output_cost_per_token_above_128k_tokens", None
-                    ),
-                    output_cost_per_character_above_128k_tokens=_model_info.get(
-                        "output_cost_per_character_above_128k_tokens", None
-                    ),
-                    litellm_provider=_model_info.get(
-                        "litellm_provider", custom_llm_provider
-                    ),
-                    mode=_model_info.get("mode"),
-                    supported_openai_params=supported_openai_params,
-                    supports_system_messages=_model_info.get(
-                        "supports_system_messages", None
-                    ),
-                )
             else:
                 raise ValueError(
                     "This model isn't mapped yet. Add it here - https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json"
                 )
+
+            ## PROVIDER-SPECIFIC INFORMATION
+            if custom_llm_provider == "predibase":
+                _model_info["supports_response_schema"] = True
+
+            return ModelInfo(
+                max_tokens=_model_info.get("max_tokens", None),
+                max_input_tokens=_model_info.get("max_input_tokens", None),
+                max_output_tokens=_model_info.get("max_output_tokens", None),
+                input_cost_per_token=_model_info.get("input_cost_per_token", 0),
+                input_cost_per_character=_model_info.get(
+                    "input_cost_per_character", None
+                ),
+                input_cost_per_token_above_128k_tokens=_model_info.get(
+                    "input_cost_per_token_above_128k_tokens", None
+                ),
+                output_cost_per_token=_model_info.get("output_cost_per_token", 0),
+                output_cost_per_character=_model_info.get(
+                    "output_cost_per_character", None
+                ),
+                output_cost_per_token_above_128k_tokens=_model_info.get(
+                    "output_cost_per_token_above_128k_tokens", None
+                ),
+                output_cost_per_character_above_128k_tokens=_model_info.get(
+                    "output_cost_per_character_above_128k_tokens", None
+                ),
+                litellm_provider=_model_info.get(
+                    "litellm_provider", custom_llm_provider
+                ),
+                mode=_model_info.get("mode"),
+                supported_openai_params=supported_openai_params,
+                supports_system_messages=_model_info.get(
+                    "supports_system_messages", None
+                ),
+                supports_response_schema=_model_info.get(
+                    "supports_response_schema", None
+                ),
+            )
     except Exception:
         raise Exception(
             "This model isn't mapped yet. Add it here - https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json"
@@ -5824,10 +5859,13 @@ def exception_type(
                 or custom_llm_provider in litellm.openai_compatible_providers
             ):
                 # custom_llm_provider is openai, make it OpenAI
-                if hasattr(original_exception, "message"):
-                    message = original_exception.message
-                else:
-                    message = str(original_exception)
+                message = get_error_message(error_obj=original_exception)
+                if message is None:
+                    if hasattr(original_exception, "message"):
+                        message = original_exception.message
+                    else:
+                        message = str(original_exception)
+
                 if message is not None and isinstance(message, str):
                     message = message.replace("OPENAI", custom_llm_provider.upper())
                     message = message.replace("openai", custom_llm_provider)
@@ -6160,11 +6198,18 @@ def exception_type(
                         )
                     elif (
                         original_exception.status_code == 400
-                        or original_exception.status_code == 422
                         or original_exception.status_code == 413
                     ):
                         exception_mapping_worked = True
                         raise BadRequestError(
+                            message=f"ReplicateException - {original_exception.message}",
+                            model=model,
+                            llm_provider="replicate",
+                            response=original_exception.response,
+                        )
+                    elif original_exception.status_code == 422:
+                        exception_mapping_worked = True
+                        raise UnprocessableEntityError(
                             message=f"ReplicateException - {original_exception.message}",
                             model=model,
                             llm_provider="replicate",
@@ -7273,10 +7318,17 @@ def exception_type(
                             request=original_exception.request,
                         )
             elif custom_llm_provider == "azure":
+                message = get_error_message(error_obj=original_exception)
+                if message is None:
+                    if hasattr(original_exception, "message"):
+                        message = original_exception.message
+                    else:
+                        message = str(original_exception)
+
                 if "Internal server error" in error_str:
                     exception_mapping_worked = True
                     raise litellm.InternalServerError(
-                        message=f"AzureException Internal server error - {original_exception.message}",
+                        message=f"AzureException Internal server error - {message}",
                         llm_provider="azure",
                         model=model,
                         litellm_debug_info=extra_information,
@@ -7289,7 +7341,7 @@ def exception_type(
                 elif "This model's maximum context length is" in error_str:
                     exception_mapping_worked = True
                     raise ContextWindowExceededError(
-                        message=f"AzureException ContextWindowExceededError - {original_exception.message}",
+                        message=f"AzureException ContextWindowExceededError - {message}",
                         llm_provider="azure",
                         model=model,
                         litellm_debug_info=extra_information,
@@ -7298,7 +7350,7 @@ def exception_type(
                 elif "DeploymentNotFound" in error_str:
                     exception_mapping_worked = True
                     raise NotFoundError(
-                        message=f"AzureException NotFoundError - {original_exception.message}",
+                        message=f"AzureException NotFoundError - {message}",
                         llm_provider="azure",
                         model=model,
                         litellm_debug_info=extra_information,
@@ -7318,7 +7370,7 @@ def exception_type(
                 ):
                     exception_mapping_worked = True
                     raise ContentPolicyViolationError(
-                        message=f"litellm.ContentPolicyViolationError: AzureException - {original_exception.message}",
+                        message=f"litellm.ContentPolicyViolationError: AzureException - {message}",
                         llm_provider="azure",
                         model=model,
                         litellm_debug_info=extra_information,
@@ -7327,7 +7379,7 @@ def exception_type(
                 elif "invalid_request_error" in error_str:
                     exception_mapping_worked = True
                     raise BadRequestError(
-                        message=f"AzureException BadRequestError - {original_exception.message}",
+                        message=f"AzureException BadRequestError - {message}",
                         llm_provider="azure",
                         model=model,
                         litellm_debug_info=extra_information,
@@ -7339,7 +7391,7 @@ def exception_type(
                 ):
                     exception_mapping_worked = True
                     raise AuthenticationError(
-                        message=f"{exception_provider} AuthenticationError - {original_exception.message}",
+                        message=f"{exception_provider} AuthenticationError - {message}",
                         llm_provider=custom_llm_provider,
                         model=model,
                         litellm_debug_info=extra_information,
@@ -7350,7 +7402,7 @@ def exception_type(
                     if original_exception.status_code == 400:
                         exception_mapping_worked = True
                         raise BadRequestError(
-                            message=f"AzureException - {original_exception.message}",
+                            message=f"AzureException - {message}",
                             llm_provider="azure",
                             model=model,
                             litellm_debug_info=extra_information,
@@ -7359,7 +7411,7 @@ def exception_type(
                     elif original_exception.status_code == 401:
                         exception_mapping_worked = True
                         raise AuthenticationError(
-                            message=f"AzureException AuthenticationError - {original_exception.message}",
+                            message=f"AzureException AuthenticationError - {message}",
                             llm_provider="azure",
                             model=model,
                             litellm_debug_info=extra_information,
@@ -7368,7 +7420,7 @@ def exception_type(
                     elif original_exception.status_code == 408:
                         exception_mapping_worked = True
                         raise Timeout(
-                            message=f"AzureException Timeout - {original_exception.message}",
+                            message=f"AzureException Timeout - {message}",
                             model=model,
                             litellm_debug_info=extra_information,
                             llm_provider="azure",
@@ -7376,7 +7428,7 @@ def exception_type(
                     elif original_exception.status_code == 422:
                         exception_mapping_worked = True
                         raise BadRequestError(
-                            message=f"AzureException BadRequestError - {original_exception.message}",
+                            message=f"AzureException BadRequestError - {message}",
                             model=model,
                             llm_provider="azure",
                             litellm_debug_info=extra_information,
@@ -7385,7 +7437,7 @@ def exception_type(
                     elif original_exception.status_code == 429:
                         exception_mapping_worked = True
                         raise RateLimitError(
-                            message=f"AzureException RateLimitError - {original_exception.message}",
+                            message=f"AzureException RateLimitError - {message}",
                             model=model,
                             llm_provider="azure",
                             litellm_debug_info=extra_information,
@@ -7394,7 +7446,7 @@ def exception_type(
                     elif original_exception.status_code == 503:
                         exception_mapping_worked = True
                         raise ServiceUnavailableError(
-                            message=f"AzureException ServiceUnavailableError - {original_exception.message}",
+                            message=f"AzureException ServiceUnavailableError - {message}",
                             model=model,
                             llm_provider="azure",
                             litellm_debug_info=extra_information,
@@ -7403,7 +7455,7 @@ def exception_type(
                     elif original_exception.status_code == 504:  # gateway timeout error
                         exception_mapping_worked = True
                         raise Timeout(
-                            message=f"AzureException Timeout - {original_exception.message}",
+                            message=f"AzureException Timeout - {message}",
                             model=model,
                             litellm_debug_info=extra_information,
                             llm_provider="azure",
@@ -7412,7 +7464,7 @@ def exception_type(
                         exception_mapping_worked = True
                         raise APIError(
                             status_code=original_exception.status_code,
-                            message=f"AzureException APIError - {original_exception.message}",
+                            message=f"AzureException APIError - {message}",
                             llm_provider="azure",
                             litellm_debug_info=extra_information,
                             model=model,
