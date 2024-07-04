@@ -203,7 +203,7 @@ def test_vertex_ai_anthropic():
 # )
 def test_vertex_ai_anthropic_streaming():
     try:
-        # load_vertex_ai_credentials()
+        load_vertex_ai_credentials()
 
         # litellm.set_verbose = True
 
@@ -223,8 +223,9 @@ def test_vertex_ai_anthropic_streaming():
             stream=True,
         )
         # print("\nModel Response", response)
-        for chunk in response:
+        for idx, chunk in enumerate(response):
             print(f"chunk: {chunk}")
+            streaming_format_tests(idx=idx, chunk=chunk)
 
     # raise Exception("it worked!")
     except litellm.RateLimitError as e:
@@ -294,8 +295,10 @@ async def test_vertex_ai_anthropic_async_streaming():
             stream=True,
         )
 
+        idx = 0
         async for chunk in response:
-            print(f"chunk: {chunk}")
+            streaming_format_tests(idx=idx, chunk=chunk)
+            idx += 1
     except litellm.RateLimitError as e:
         pass
     except Exception as e:
@@ -637,11 +640,13 @@ def test_gemini_pro_vision_base64():
             pytest.fail(f"An exception occurred - {str(e)}")
 
 
-@pytest.mark.skip(reason="exhausted vertex quota. need to refactor to mock the call")
-@pytest.mark.parametrize("provider", ["vertex_ai_beta"])  # "vertex_ai",
+# @pytest.mark.skip(reason="exhausted vertex quota. need to refactor to mock the call")
+@pytest.mark.parametrize(
+    "model", ["vertex_ai_beta/gemini-1.5-pro", "vertex_ai/claude-3-sonnet@20240229"]
+)  # "vertex_ai",
 @pytest.mark.parametrize("sync_mode", [True])  # "vertex_ai",
 @pytest.mark.asyncio
-async def test_gemini_pro_function_calling_httpx(provider, sync_mode):
+async def test_gemini_pro_function_calling_httpx(model, sync_mode):
     try:
         load_vertex_ai_credentials()
         litellm.set_verbose = True
@@ -679,7 +684,7 @@ async def test_gemini_pro_function_calling_httpx(provider, sync_mode):
         ]
 
         data = {
-            "model": "{}/gemini-1.5-pro".format(provider),
+            "model": model,
             "messages": messages,
             "tools": tools,
             "tool_choice": "required",
