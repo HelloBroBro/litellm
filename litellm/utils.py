@@ -2412,7 +2412,7 @@ def get_optional_params(
         ):  # allow dynamically setting vertex ai init logic
             continue
         passed_params[k] = v
-
+                
     optional_params: Dict = {}
 
     common_auth_dict = litellm.common_cloud_provider_auth_params
@@ -2431,7 +2431,7 @@ def get_optional_params(
                     non_default_params=passed_params, optional_params=optional_params
                 )
             )
-        elif custom_llm_provider == "vertex_ai":
+        elif custom_llm_provider == "vertex_ai" or custom_llm_provider == "vertex_ai_beta":
             optional_params = litellm.VertexAIConfig().map_special_auth_params(
                 non_default_params=passed_params, optional_params=optional_params
             )
@@ -3914,6 +3914,11 @@ def get_supported_openai_params(
             return litellm.VertexAIConfig().get_supported_openai_params()
         elif request_type == "embeddings":
             return litellm.VertexAITextEmbeddingConfig().get_supported_openai_params()
+    elif custom_llm_provider == "vertex_ai_beta":
+        if request_type == "chat_completion":
+            return litellm.VertexAIConfig().get_supported_openai_params()
+        elif request_type == "embeddings":
+            return litellm.VertexAITextEmbeddingConfig().get_supported_openai_params()
     elif custom_llm_provider == "sagemaker":
         return ["stream", "temperature", "max_tokens", "top_p", "stop", "n"]
     elif custom_llm_provider == "aleph_alpha":
@@ -4680,6 +4685,7 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
                 output_cost_per_character_above_128k_tokens=_model_info.get(
                     "output_cost_per_character_above_128k_tokens", None
                 ),
+                output_vector_size=_model_info.get("output_vector_size", None),
                 litellm_provider=_model_info.get(
                     "litellm_provider", custom_llm_provider
                 ),
@@ -9203,7 +9209,9 @@ class CustomStreamWrapper:
                 if response_obj["is_finished"]:
                     if response_obj["finish_reason"] == "error":
                         raise Exception(
-                            "Mistral API raised a streaming error - finish_reason: error, no content string given."
+                            "{} raised a streaming error - finish_reason: error, no content string given. Received Chunk={}".format(
+                                self.custom_llm_provider, response_obj
+                            )
                         )
                     self.received_finish_reason = response_obj["finish_reason"]
                 if response_obj.get("original_chunk", None) is not None:

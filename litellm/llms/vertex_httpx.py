@@ -748,10 +748,12 @@ class VertexLLM(BaseLLM):
             if project_id is None:
                 project_id = creds.project_id
         else:
-            creds, project_id = google_auth.default(
+            creds, creds_project_id = google_auth.default(
                 quota_project_id=project_id,
                 scopes=["https://www.googleapis.com/auth/cloud-platform"],
             )
+            if project_id is None:
+                project_id = creds_project_id
 
         creds.refresh(Request())
 
@@ -1035,9 +1037,7 @@ class VertexLLM(BaseLLM):
             safety_settings: Optional[List[SafetSettingsConfig]] = optional_params.pop(
                 "safety_settings", None
             )  # type: ignore
-            cached_content: Optional[str] = optional_params.pop(
-                "cached_content", None
-            )
+            cached_content: Optional[str] = optional_params.pop("cached_content", None)
             generation_config: Optional[GenerationConfig] = GenerationConfig(
                 **optional_params
             )
