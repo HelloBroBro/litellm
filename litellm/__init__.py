@@ -16,7 +16,7 @@ from litellm._logging import (
     log_level,
 )
 
-
+from litellm.types.guardrails import GuardrailItem
 from litellm.proxy._types import (
     KeyManagementSystem,
     KeyManagementSettings,
@@ -113,6 +113,7 @@ ssl_verify: bool = True
 ssl_certificate: Optional[str] = None
 disable_streaming_logging: bool = False
 in_memory_llm_clients_cache: dict = {}
+safe_memory_mode: bool = False
 ### DEFAULT AZURE API VERSION ###
 AZURE_DEFAULT_API_VERSION = "2024-02-01"  # this is updated to the latest
 ### GUARDRAILS ###
@@ -124,6 +125,7 @@ llamaguard_unsafe_content_categories: Optional[str] = None
 blocked_user_list: Optional[Union[str, List]] = None
 banned_keywords_list: Optional[Union[str, List]] = None
 llm_guard_mode: Literal["all", "key-specific", "request-specific"] = "all"
+guardrail_name_config_map: Optional[Dict[str, GuardrailItem]] = None
 ##################
 ### PREVIEW FEATURES ###
 enable_preview_features: bool = False
