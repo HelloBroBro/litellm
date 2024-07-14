@@ -125,7 +125,7 @@ llamaguard_unsafe_content_categories: Optional[str] = None
 blocked_user_list: Optional[Union[str, List]] = None
 banned_keywords_list: Optional[Union[str, List]] = None
 llm_guard_mode: Literal["all", "key-specific", "request-specific"] = "all"
-guardrail_name_config_map: Optional[Dict[str, GuardrailItem]] = None
+guardrail_name_config_map: Dict[str, GuardrailItem] = {}
 ##################
 ### PREVIEW FEATURES ###
 enable_preview_features: bool = False
@@ -876,6 +876,7 @@ from .exceptions import (
     InternalServerError,
     JSONSchemaValidationError,
     LITELLM_EXCEPTION_TYPES,
+    MockException,
 )
 from .budget_manager import BudgetManager
 from .proxy.proxy_cli import run_server
