@@ -694,7 +694,7 @@ def client(original_function):
             kwargs["litellm_call_id"] = str(uuid.uuid4())
         try:
             model = args[0] if len(args) > 0 else kwargs["model"]
-        except:
+        except Exception:
             model = None
             if (
                 call_type != CallTypes.image_generation.value
@@ -4255,44 +4255,44 @@ def get_llm_provider(
             model = model.split("/", 1)[1]
             if custom_llm_provider == "perplexity":
                 # perplexity is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.perplexity.ai
-                api_base = "https://api.perplexity.ai"
+                api_base = api_base or "https://api.perplexity.ai"
                 dynamic_api_key = get_secret("PERPLEXITYAI_API_KEY")
             elif custom_llm_provider == "anyscale":
                 # anyscale is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.endpoints.anyscale.com/v1
-                api_base = "https://api.endpoints.anyscale.com/v1"
+                api_base = api_base or "https://api.endpoints.anyscale.com/v1"
                 dynamic_api_key = get_secret("ANYSCALE_API_KEY")
             elif custom_llm_provider == "deepinfra":
                 # deepinfra is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.endpoints.anyscale.com/v1
-                api_base = "https://api.deepinfra.com/v1/openai"
+                api_base = api_base or "https://api.deepinfra.com/v1/openai"
                 dynamic_api_key = get_secret("DEEPINFRA_API_KEY")
             elif custom_llm_provider == "empower":
-                api_base = "https://app.empower.dev/api/v1"
+                api_base = api_base or "https://app.empower.dev/api/v1"
                 dynamic_api_key = get_secret("EMPOWER_API_KEY")
             elif custom_llm_provider == "groq":
                 # groq is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.groq.com/openai/v1
-                api_base = "https://api.groq.com/openai/v1"
+                api_base = api_base or "https://api.groq.com/openai/v1"
                 dynamic_api_key = get_secret("GROQ_API_KEY")
             elif custom_llm_provider == "nvidia_nim":
                 # nvidia_nim is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.endpoints.anyscale.com/v1
-                api_base = "https://integrate.api.nvidia.com/v1"
+                api_base = api_base or "https://integrate.api.nvidia.com/v1"
                 dynamic_api_key = get_secret("NVIDIA_NIM_API_KEY")
             elif custom_llm_provider == "volcengine":
                 # volcengine is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.endpoints.anyscale.com/v1
-                api_base = "https://ark.cn-beijing.volces.com/api/v3"
+                api_base = api_base or "https://ark.cn-beijing.volces.com/api/v3"
                 dynamic_api_key = get_secret("VOLCENGINE_API_KEY")
             elif custom_llm_provider == "codestral":
                 # codestral is openai compatible, we just need to set this to custom_openai and have the api_base be https://codestral.mistral.ai/v1
-                api_base = "https://codestral.mistral.ai/v1"
+                api_base = api_base or "https://codestral.mistral.ai/v1"
                 dynamic_api_key = get_secret("CODESTRAL_API_KEY")
             elif custom_llm_provider == "deepseek":
                 # deepseek is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.deepseek.com/v1
-                api_base = "https://api.deepseek.com/v1"
+                api_base = api_base or "https://api.deepseek.com/v1"
                 dynamic_api_key = get_secret("DEEPSEEK_API_KEY")
             elif custom_llm_provider == "fireworks_ai":
                 # fireworks is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.fireworks.ai/inference/v1
                 if not model.startswith("accounts/fireworks/models"):
                     model = f"accounts/fireworks/models/{model}"
-                api_base = "https://api.fireworks.ai/inference/v1"
+                api_base = api_base or "https://api.fireworks.ai/inference/v1"
                 dynamic_api_key = (
                     get_secret("FIREWORKS_API_KEY")
                     or get_secret("FIREWORKS_AI_API_KEY")
@@ -4665,13 +4665,40 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
 
     Returns:
         dict: A dictionary containing the following information:
-            - max_tokens (int): The maximum number of tokens allowed for the given model.
-            - input_cost_per_token (float): The cost per token for input.
-            - output_cost_per_token (float): The cost per token for output.
-            - litellm_provider (str): The provider of the model (e.g., "openai").
-            - mode (str): The mode of the model (e.g., "chat" or "completion").
-            - supported_openai_params (List[str]): A list of supported OpenAI parameters for the model.
-
+            max_tokens: Required[Optional[int]]
+            max_input_tokens: Required[Optional[int]]
+            max_output_tokens: Required[Optional[int]]
+            input_cost_per_token: Required[float]
+            input_cost_per_character: Optional[float]  # only for vertex ai models
+            input_cost_per_token_above_128k_tokens: Optional[float]  # only for vertex ai models
+            input_cost_per_character_above_128k_tokens: Optional[
+                float
+            ]  # only for vertex ai models
+            input_cost_per_image: Optional[float]  # only for vertex ai models
+            input_cost_per_audio_per_second: Optional[float]  # only for vertex ai models
+            input_cost_per_video_per_second: Optional[float]  # only for vertex ai models
+            output_cost_per_token: Required[float]
+            output_cost_per_character: Optional[float]  # only for vertex ai models
+            output_cost_per_token_above_128k_tokens: Optional[
+                float
+            ]  # only for vertex ai models
+            output_cost_per_character_above_128k_tokens: Optional[
+                float
+            ]  # only for vertex ai models
+            output_cost_per_image: Optional[float]
+            output_vector_size: Optional[int]
+            output_cost_per_video_per_second: Optional[float]  # only for vertex ai models
+            output_cost_per_audio_per_second: Optional[float]  # only for vertex ai models
+            litellm_provider: Required[str]
+            mode: Required[
+                Literal[
+                    "completion", "embedding", "image_generation", "chat", "audio_transcription"
+                ]
+            ]
+            supported_openai_params: Required[Optional[List[str]]]
+            supports_system_messages: Optional[bool]
+            supports_response_schema: Optional[bool]
+            supports_vision: Optional[bool]
     Raises:
         Exception: If the model is not mapped yet.
 
