@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -750,10 +751,14 @@ async def team_info(
 
         if user_api_key_dict.user_role == LitellmUserRoles.PROXY_ADMIN.value:
             pass
-        elif user_api_key_dict.team_id or (team_id != user_api_key_dict.team_id):
+        elif user_api_key_dict.team_id is None or (
+            team_id != user_api_key_dict.team_id
+        ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="key not allowed to access this team's info",
+                detail="key not allowed to access this team's info. Key team_id={}, Requested team_id={}".format(
+                    user_api_key_dict.team_id, team_id
+                ),
             )
 
         team_info = await prisma_client.get_data(
@@ -791,6 +796,11 @@ async def team_info(
         return {"team_id": team_id, "team_info": team_info, "keys": keys}
 
     except Exception as e:
+        verbose_proxy_logger.error(
+            "litellm.proxy.management_endpoints.team_endpoints.py::team_info - Exception occurred - {}\n{}".format(
+                e, traceback.format_exc()
+            )
+        )
         if isinstance(e, HTTPException):
             raise ProxyException(
                 message=getattr(e, "detail", f"Authentication Error({str(e)})"),
