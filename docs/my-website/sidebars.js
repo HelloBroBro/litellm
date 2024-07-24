@@ -184,7 +184,14 @@ const sidebars = {
     "scheduler",
     "set_keys",
     "budget_manager",
-    "secret",
+    {
+      type: "category", 
+      label: "Secret Manager", 
+      items: [
+        "secret", 
+        "oidc"
+      ]
+    },
     "completion/token_usage",
     "load_test",
     {
@@ -199,9 +206,10 @@ const sidebars = {
         "observability/raw_request_response",
         "observability/custom_callback",
         "observability/scrub_data",
-        "observability/helicone_integration",
+        "observability/braintrust",
         "observability/sentry",
         "observability/lago",
+        "observability/helicone_integration",
         "observability/openmeter",
         "observability/promptlayer_integration",
         "observability/wandb_integration",

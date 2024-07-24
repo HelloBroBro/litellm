@@ -346,7 +346,7 @@ def test_completion_claude_3_empty_response():
     messages = [
         {
             "role": "system",
-            "content": "You are 2twNLGfqk4GMOn3ffp4p.",
+            "content": [{"type": "text", "text": "You are 2twNLGfqk4GMOn3ffp4p."}],
         },
         {"role": "user", "content": "Hi gm!", "name": "ishaan"},
         {"role": "assistant", "content": "Good morning! How are you doing today?"},
@@ -1364,6 +1364,12 @@ def test_completion_openai_response_headers():
     print("response_headers=", response._response_headers)
     assert response._response_headers is not None
     assert "x-ratelimit-remaining-tokens" in response._response_headers
+    assert isinstance(
+        response._hidden_params["additional_headers"][
+            "llm_provider-x-ratelimit-remaining-requests"
+        ],
+        str,
+    )
 
     # /chat/completion - with streaming
 
@@ -1376,6 +1382,12 @@ def test_completion_openai_response_headers():
     print("streaming response_headers=", response_headers)
     assert response_headers is not None
     assert "x-ratelimit-remaining-tokens" in response_headers
+    assert isinstance(
+        response._hidden_params["additional_headers"][
+            "llm_provider-x-ratelimit-remaining-requests"
+        ],
+        str,
+    )
 
     for chunk in streaming_response:
         print("chunk=", chunk)
@@ -1390,6 +1402,12 @@ def test_completion_openai_response_headers():
     print("embedding_response_headers=", embedding_response_headers)
     assert embedding_response_headers is not None
     assert "x-ratelimit-remaining-tokens" in embedding_response_headers
+    assert isinstance(
+        response._hidden_params["additional_headers"][
+            "llm_provider-x-ratelimit-remaining-requests"
+        ],
+        str,
+    )
 
     litellm.return_response_headers = False
 

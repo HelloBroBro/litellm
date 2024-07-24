@@ -657,7 +657,11 @@ async def _PROXY_track_cost_callback(
     global prisma_client, custom_db_client
     try:
         # check if it has collected an entire stream response
-        verbose_proxy_logger.debug("Proxy: In track_cost_callback for: %s", kwargs)
+        verbose_proxy_logger.debug(
+            "Proxy: In track_cost_callback for: kwargs=%s and completion_response: %s",
+            kwargs,
+            completion_response,
+        )
         verbose_proxy_logger.debug(
             f"kwargs stream: {kwargs.get('stream', None)} + complete streaming response: {kwargs.get('complete_streaming_response', None)}"
         )
@@ -1623,6 +1627,7 @@ class ProxyConfig:
                 alerting=general_settings.get("alerting", None),
                 alerting_threshold=general_settings.get("alerting_threshold", 600),
                 alert_types=general_settings.get("alert_types", None),
+                alert_to_webhook_url=general_settings.get("alert_to_webhook_url", None),
                 alerting_args=general_settings.get("alerting_args", None),
                 redis_cache=redis_usage_cache,
             )
@@ -2908,6 +2913,7 @@ async def chat_completion(
         fastest_response_batch_completion = hidden_params.get(
             "fastest_response_batch_completion", None
         )
+        additional_headers: dict = hidden_params.get("additional_headers", {}) or {}
 
         # Post Call Processing
         if llm_router is not None:
@@ -2930,6 +2936,7 @@ async def chat_completion(
                 response_cost=response_cost,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
                 fastest_response_batch_completion=fastest_response_batch_completion,
+                **additional_headers,
             )
             selected_data_generator = select_data_generator(
                 response=response,
@@ -2947,8 +2954,10 @@ async def chat_completion(
             user_api_key_dict=user_api_key_dict, response=response
         )
 
-        hidden_params = getattr(response, "_hidden_params", {}) or {}
-        additional_headers: dict = hidden_params.get("additional_headers", {}) or {}
+        hidden_params = (
+            getattr(response, "_hidden_params", {}) or {}
+        )  # get any updated response headers
+        additional_headers = hidden_params.get("additional_headers", {}) or {}
 
         fastapi_response.headers.update(
             get_custom_headers(
