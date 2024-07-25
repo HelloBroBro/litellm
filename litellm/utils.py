@@ -129,6 +129,7 @@ from .exceptions import (
     ServiceUnavailableError,
     Timeout,
     UnprocessableEntityError,
+    UnsupportedParamsError,
 )
 from .proxy._types import KeyManagementSystem
 from .types.llms.openai import (
@@ -223,17 +224,6 @@ last_fetched_at_keys = None
 #  'model': 'claude-instant-1',
 #  'usage': {'prompt_tokens': 18, 'completion_tokens': 23, 'total_tokens': 41}
 # }
-
-
-class UnsupportedParamsError(Exception):
-    def __init__(self, status_code, message):
-        self.status_code = status_code
-        self.message = message
-        self.request = httpx.Request(method="POST", url=" https://openai.api.com/v1/")
-        self.response = httpx.Response(status_code=status_code, request=self.request)
-        super().__init__(
-            self.message
-        )  # Call the base class constructor with the parameters it needs
 
 
 ############################################################
@@ -4496,7 +4486,11 @@ def get_llm_provider(
                     or get_secret("TOGETHER_AI_TOKEN")
                 )
             elif custom_llm_provider == "friendliai":
-                api_base = "https://inference.friendli.ai/v1"
+                api_base = (
+                    api_base
+                    or get_secret("FRIENDLI_API_BASE")
+                    or "https://inference.friendli.ai/v1"
+                )
                 dynamic_api_key = (
                     api_key
                     or get_secret("FRIENDLIAI_API_KEY")
