@@ -1507,6 +1507,21 @@ class ProxyConfig:
                     verbose_proxy_logger.debug(
                         f"litellm.post_call_rules: {litellm.post_call_rules}"
                     )
+                elif key == "custom_provider_map":
+                    from litellm.utils import custom_llm_setup
+
+                    litellm.custom_provider_map = [
+                        {
+                            "provider": item["provider"],
+                            "custom_handler": get_instance_fn(
+                                value=item["custom_handler"],
+                                config_file_path=config_file_path,
+                            ),
+                        }
+                        for item in value
+                    ]
+
+                    custom_llm_setup()
                 elif key == "success_callback":
                     litellm.success_callback = []
 
@@ -2882,6 +2897,12 @@ async def chat_completion(
         elif (
             llm_router is not None
             and data["model"] not in router_model_names
+            and llm_router.router_general_settings.pass_through_all_models is True
+        ):
+            tasks.append(litellm.acompletion(**data))
+        elif (
+            llm_router is not None
+            and data["model"] not in router_model_names
             and llm_router.default_deployment is not None
         ):  # model in router deployments, calling a specific deployment on the router
             tasks.append(llm_router.acompletion(**data))
@@ -3142,6 +3163,12 @@ async def completion(
         elif (
             llm_router is not None
             and data["model"] not in router_model_names
+            and llm_router.router_general_settings.pass_through_all_models is True
+        ):
+            llm_response = asyncio.create_task(litellm.atext_completion(**data))
+        elif (
+            llm_router is not None
+            and data["model"] not in router_model_names
             and llm_router.default_deployment is not None
         ):  # model in router deployments, calling a specific deployment on the router
             llm_response = asyncio.create_task(llm_router.atext_completion(**data))
@@ -3334,6 +3361,7 @@ async def embeddings(
         if (
             "input" in data
             and isinstance(data["input"], list)
+            and len(data["input"]) > 0
             and isinstance(data["input"][0], list)
             and isinstance(data["input"][0][0], int)
         ):  # check if array of tokens passed in
@@ -3401,6 +3429,12 @@ async def embeddings(
         elif (
             llm_router is not None
             and data["model"] not in router_model_names
+            and llm_router.router_general_settings.pass_through_all_models is True
+        ):
+            tasks.append(litellm.aembedding(**data))
+        elif (
+            llm_router is not None
+            and data["model"] not in router_model_names
             and llm_router.default_deployment is not None
         ):  # model in router deployments, calling a specific deployment on the router
             tasks.append(llm_router.aembedding(**data))
@@ -3464,8 +3498,8 @@ async def embeddings(
             litellm_debug_info,
         )
         verbose_proxy_logger.error(
-            "litellm.proxy.proxy_server.embeddings(): Exception occured - {}".format(
-                str(e)
+            "litellm.proxy.proxy_server.embeddings(): Exception occured - {}\n{}".format(
+                str(e), traceback.format_exc()
             )
         )
         verbose_proxy_logger.debug(traceback.format_exc())
