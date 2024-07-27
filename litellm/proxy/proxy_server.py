@@ -279,6 +279,8 @@ ui_link = f"/ui/"
 ui_message = (
     f"👉 [```LiteLLM Admin Panel on /ui```]({ui_link}). Create, Edit Keys with SSO"
 )
+ui_message += f"\n\n💸 [```LiteLLM Model Cost Map```](https://models.litellm.ai/)."
+
 custom_swagger_message = f"[**Customize Swagger Docs**](https://docs.litellm.ai/docs/proxy/enterprise#swagger-docs---custom-routes--branding)"
 
 ### CUSTOM BRANDING [ENTERPRISE FEATURE] ###
@@ -2371,13 +2373,15 @@ async def async_data_generator(
     try:
         start_time = time.time()
         async for chunk in response:
-
+            verbose_proxy_logger.debug(
+                "async_data_generator: received streaming chunk - {}".format(chunk)
+            )
             ### CALL HOOKS ### - modify outgoing data
             chunk = await proxy_logging_obj.async_post_call_streaming_hook(
                 user_api_key_dict=user_api_key_dict, response=chunk
             )
 
-            chunk = chunk.model_dump_json(exclude_none=True)
+            chunk = chunk.model_dump_json(exclude_none=True, exclude_unset=True)
             try:
                 yield f"data: {chunk}\n\n"
             except Exception as e:
@@ -4806,10 +4810,18 @@ async def create_batch(
     """
     global proxy_logging_obj
     data: Dict = {}
+
     try:
-        # Use orjson to parse JSON data, orjson speeds up requests significantly
-        form_data = await request.form()
-        data = {key: value for key, value in form_data.items() if key != "file"}
+        body = await request.body()
+        body_str = body.decode()
+        try:
+            data = ast.literal_eval(body_str)
+        except:
+            data = json.loads(body_str)
+
+        verbose_proxy_logger.debug(
+            "Request received by LiteLLM:\n{}".format(json.dumps(data, indent=4)),
+        )
 
         # Include original request and headers in the data
         data = await add_litellm_data_to_request(
@@ -4881,12 +4893,12 @@ async def create_batch(
 
 
 @router.get(
-    "/v1/batches{batch_id}",
+    "/v1/batches{batch_id:path}",
     dependencies=[Depends(user_api_key_auth)],
     tags=["batch"],
 )
 @router.get(
-    "/batches{batch_id}",
+    "/batches{batch_id:path}",
     dependencies=[Depends(user_api_key_auth)],
     tags=["batch"],
 )
@@ -4914,20 +4926,6 @@ async def retrieve_batch(
     global proxy_logging_obj
     data: Dict = {}
     try:
-        # Use orjson to parse JSON data, orjson speeds up requests significantly
-        form_data = await request.form()
-        data = {key: value for key, value in form_data.items() if key != "file"}
-
-        # Include original request and headers in the data
-        data = await add_litellm_data_to_request(
-            data=data,
-            request=request,
-            general_settings=general_settings,
-            user_api_key_dict=user_api_key_dict,
-            version=version,
-            proxy_config=proxy_config,
-        )
-
         _retrieve_batch_request = RetrieveBatchRequest(
             batch_id=batch_id,
         )
