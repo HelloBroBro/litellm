@@ -2089,6 +2089,7 @@ def supports_function_calling(model: str) -> bool:
     Raises:
     Exception: If the given model is not found in model_prices_and_context_window.json.
     """
+
     if model in litellm.model_cost:
         model_info = litellm.model_cost[model]
         if model_info.get("supports_function_calling", False) is True:
@@ -3103,6 +3104,15 @@ def get_optional_params(
             non_default_params=non_default_params,
             optional_params=optional_params,
         )
+    elif custom_llm_provider == "vertex_ai" and model in litellm.vertex_mistral_models:
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
+        _check_valid_arg(supported_params=supported_params)
+        optional_params = litellm.MistralConfig().map_openai_params(
+            non_default_params=non_default_params,
+            optional_params=optional_params,
+        )
     elif custom_llm_provider == "sagemaker":
         ## check if unsupported param passed in
         supported_params = get_supported_openai_params(
@@ -3293,7 +3303,9 @@ def get_optional_params(
         _check_valid_arg(supported_params=supported_params)
 
         optional_params = litellm.OllamaChatConfig().map_openai_params(
-            non_default_params=non_default_params, optional_params=optional_params
+            model=model,
+            non_default_params=non_default_params,
+            optional_params=optional_params,
         )
     elif custom_llm_provider == "nlp_cloud":
         supported_params = get_supported_openai_params(
@@ -4207,7 +4219,8 @@ def get_supported_openai_params(
         if request_type == "chat_completion":
             if model.startswith("meta/"):
                 return litellm.VertexAILlama3Config().get_supported_openai_params()
-
+            if model.startswith("mistral"):
+                return litellm.MistralConfig().get_supported_openai_params()
             return litellm.VertexAIConfig().get_supported_openai_params()
         elif request_type == "embeddings":
             return litellm.VertexAITextEmbeddingConfig().get_supported_openai_params()
@@ -4460,7 +4473,7 @@ def get_llm_provider(
                 dynamic_api_key = api_key or get_secret("DEEPSEEK_API_KEY")
             elif custom_llm_provider == "fireworks_ai":
                 # fireworks is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.fireworks.ai/inference/v1
-                if not model.startswith("accounts/fireworks/models"):
+                if not model.startswith("accounts/"):
                     model = f"accounts/fireworks/models/{model}"
                 api_base = api_base or "https://api.fireworks.ai/inference/v1"
                 dynamic_api_key = api_key or (
@@ -4877,6 +4890,7 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
             supports_system_messages: Optional[bool]
             supports_response_schema: Optional[bool]
             supports_vision: Optional[bool]
+            supports_function_calling: Optional[bool]
     Raises:
         Exception: If the model is not mapped yet.
 
@@ -4951,6 +4965,7 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
                 supported_openai_params=supported_openai_params,
                 supports_system_messages=None,
                 supports_response_schema=None,
+                supports_function_calling=None,
             )
         else:
             """
@@ -5041,6 +5056,9 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
                     "supports_response_schema", None
                 ),
                 supports_vision=_model_info.get("supports_vision", False),
+                supports_function_calling=_model_info.get(
+                    "supports_function_calling", False
+                ),
             )
     except Exception:
         raise Exception(
@@ -6715,7 +6733,10 @@ def exception_type(
                         model=model,
                         response=original_exception.response,
                     )
-            elif custom_llm_provider == "predibase":
+            elif (
+                custom_llm_provider == "predibase"
+                or custom_llm_provider == "databricks"
+            ):
                 if "authorization denied for" in error_str:
                     exception_mapping_worked = True
 
@@ -6731,8 +6752,8 @@ def exception_type(
                         error_str += "XXXXXXX" + '"'
 
                     raise AuthenticationError(
-                        message=f"PredibaseException: Authentication Error - {error_str}",
-                        llm_provider="predibase",
+                        message=f"{custom_llm_provider}Exception: Authentication Error - {error_str}",
+                        llm_provider=custom_llm_provider,
                         model=model,
                         response=original_exception.response,
                         litellm_debug_info=extra_information,
@@ -6741,35 +6762,35 @@ def exception_type(
                     if original_exception.status_code == 500:
                         exception_mapping_worked = True
                         raise litellm.InternalServerError(
-                            message=f"PredibaseException - {original_exception.message}",
-                            llm_provider="predibase",
+                            message=f"{custom_llm_provider}Exception - {original_exception.message}",
+                            llm_provider=custom_llm_provider,
                             model=model,
                         )
                     elif original_exception.status_code == 401:
                         exception_mapping_worked = True
                         raise AuthenticationError(
-                            message=f"PredibaseException - {original_exception.message}",
-                            llm_provider="predibase",
+                            message=f"{custom_llm_provider}Exception - {original_exception.message}",
+                            llm_provider=custom_llm_provider,
                             model=model,
                         )
                     elif original_exception.status_code == 400:
                         exception_mapping_worked = True
                         raise BadRequestError(
-                            message=f"PredibaseException - {original_exception.message}",
-                            llm_provider="predibase",
+                            message=f"{custom_llm_provider}Exception - {original_exception.message}",
+                            llm_provider=custom_llm_provider,
                             model=model,
                         )
                     elif original_exception.status_code == 404:
                         exception_mapping_worked = True
                         raise NotFoundError(
-                            message=f"PredibaseException - {original_exception.message}",
-                            llm_provider="predibase",
+                            message=f"{custom_llm_provider}Exception - {original_exception.message}",
+                            llm_provider=custom_llm_provider,
                             model=model,
                         )
                     elif original_exception.status_code == 408:
                         exception_mapping_worked = True
                         raise Timeout(
-                            message=f"PredibaseException - {original_exception.message}",
+                            message=f"{custom_llm_provider}Exception - {original_exception.message}",
                             model=model,
                             llm_provider=custom_llm_provider,
                             litellm_debug_info=extra_information,
@@ -6780,7 +6801,7 @@ def exception_type(
                     ):
                         exception_mapping_worked = True
                         raise BadRequestError(
-                            message=f"PredibaseException - {original_exception.message}",
+                            message=f"{custom_llm_provider}Exception - {original_exception.message}",
                             model=model,
                             llm_provider=custom_llm_provider,
                             litellm_debug_info=extra_information,
@@ -6788,7 +6809,7 @@ def exception_type(
                     elif original_exception.status_code == 429:
                         exception_mapping_worked = True
                         raise RateLimitError(
-                            message=f"PredibaseException - {original_exception.message}",
+                            message=f"{custom_llm_provider}Exception - {original_exception.message}",
                             model=model,
                             llm_provider=custom_llm_provider,
                             litellm_debug_info=extra_information,
@@ -6796,7 +6817,7 @@ def exception_type(
                     elif original_exception.status_code == 503:
                         exception_mapping_worked = True
                         raise ServiceUnavailableError(
-                            message=f"PredibaseException - {original_exception.message}",
+                            message=f"{custom_llm_provider}Exception - {original_exception.message}",
                             model=model,
                             llm_provider=custom_llm_provider,
                             litellm_debug_info=extra_information,
@@ -6804,7 +6825,7 @@ def exception_type(
                     elif original_exception.status_code == 504:  # gateway timeout error
                         exception_mapping_worked = True
                         raise Timeout(
-                            message=f"PredibaseException - {original_exception.message}",
+                            message=f"{custom_llm_provider}Exception - {original_exception.message}",
                             model=model,
                             llm_provider=custom_llm_provider,
                             litellm_debug_info=extra_information,
@@ -9253,11 +9274,20 @@ class CustomStreamWrapper:
         try:
             # return this for all models
             completion_obj = {"content": ""}
-            if self.custom_llm_provider and (
-                self.custom_llm_provider == "anthropic"
-                or self.custom_llm_provider in litellm._custom_providers
+            from litellm.types.utils import GenericStreamingChunk as GChunk
+
+            if (
+                isinstance(chunk, dict)
+                and all(
+                    key in chunk for key in GChunk.__annotations__
+                )  # check if chunk is a generic streaming chunk
+            ) or (
+                self.custom_llm_provider
+                and (
+                    self.custom_llm_provider == "anthropic"
+                    or self.custom_llm_provider in litellm._custom_providers
+                )
             ):
-                from litellm.types.utils import GenericStreamingChunk as GChunk
 
                 if self.received_finish_reason is not None:
                     raise StopIteration
@@ -9609,22 +9639,6 @@ class CustomStreamWrapper:
                 response_obj = litellm.MistralTextCompletionConfig()._chunk_parser(
                     chunk
                 )
-                completion_obj["content"] = response_obj["text"]
-                print_verbose(f"completion obj content: {completion_obj['content']}")
-                if response_obj["is_finished"]:
-                    self.received_finish_reason = response_obj["finish_reason"]
-                if (
-                    self.stream_options
-                    and self.stream_options.get("include_usage", False) == True
-                    and response_obj["usage"] is not None
-                ):
-                    model_response.usage = litellm.Usage(
-                        prompt_tokens=response_obj["usage"].prompt_tokens,
-                        completion_tokens=response_obj["usage"].completion_tokens,
-                        total_tokens=response_obj["usage"].total_tokens,
-                    )
-            elif self.custom_llm_provider == "databricks":
-                response_obj = litellm.DatabricksConfig()._chunk_parser(chunk)
                 completion_obj["content"] = response_obj["text"]
                 print_verbose(f"completion obj content: {completion_obj['content']}")
                 if response_obj["is_finished"]:
