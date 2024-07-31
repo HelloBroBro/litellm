@@ -567,9 +567,13 @@ async def test_completion_predibase_streaming(sync_mode):
                 raise Exception("Empty response received")
 
         print(f"complete_response: {complete_response}")
-    except litellm.Timeout as e:
+    except litellm.Timeout:
         pass
-    except litellm.InternalServerError as e:
+    except litellm.InternalServerError:
+        pass
+    except litellm.ServiceUnavailableError:
+        pass
+    except litellm.APIConnectionError:
         pass
     except Exception as e:
         print("ERROR class", e.__class__)
@@ -1493,6 +1497,11 @@ async def test_parallel_streaming_requests(sync_mode, model):
 
     except RateLimitError:
         pass
+    except litellm.ServiceUnavailableError as e:
+        if model == "predibase/llama-3-8b-instruct":
+            pass
+        else:
+            pytest.fail(f"Service Unavailable Error got{str(e)}")
     except litellm.InternalServerError as e:
         if "predibase" in str(e).lower():
             # only skip internal server error from predibase - their endpoint seems quite unstable
@@ -1722,6 +1731,7 @@ def test_sagemaker_weird_response():
 # test_sagemaker_weird_response()
 
 
+@pytest.mark.skip(reason="Move to being a mock endpoint")
 @pytest.mark.asyncio
 async def test_sagemaker_streaming_async():
     try:
@@ -1764,6 +1774,7 @@ async def test_sagemaker_streaming_async():
 # asyncio.run(test_sagemaker_streaming_async())
 
 
+@pytest.mark.skip(reason="costly sagemaker deployment. Move to mock implementation")
 def test_completion_sagemaker_stream():
     try:
         response = completion(
