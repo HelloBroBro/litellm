@@ -153,6 +153,8 @@ from litellm.proxy.common_utils.init_callbacks import initialize_callbacks_on_pr
 from litellm.proxy.common_utils.openai_endpoint_utils import (
     remove_sensitive_info_from_deployment,
 )
+from litellm.proxy.fine_tuning_endpoints.endpoints import router as fine_tuning_router
+from litellm.proxy.fine_tuning_endpoints.endpoints import set_fine_tuning_config
 from litellm.proxy.guardrails.init_guardrails import initialize_guardrails
 from litellm.proxy.health_check import perform_health_check
 from litellm.proxy.health_endpoints._health_endpoints import router as health_router
@@ -179,6 +181,7 @@ from litellm.proxy.management_endpoints.team_endpoints import router as team_rou
 from litellm.proxy.openai_files_endpoints.files_endpoints import (
     router as openai_files_router,
 )
+from litellm.proxy.openai_files_endpoints.files_endpoints import set_files_config
 from litellm.proxy.pass_through_endpoints.pass_through_endpoints import (
     initialize_pass_through_endpoints,
 )
@@ -1807,6 +1810,14 @@ class ProxyConfig:
                     assistant_settings["litellm_params"][k] = v
             assistants_config = AssistantsTypedDict(**assistant_settings)  # type: ignore
 
+        ## /fine_tuning/jobs endpoints config
+        finetuning_config = config.get("finetune_settings", None)
+        set_fine_tuning_config(config=finetuning_config)
+
+        ## /files endpoint config
+        files_config = config.get("files_settings", None)
+        set_files_config(config=files_config)
+
         ## ROUTER SETTINGS (e.g. routing_strategy, ...)
         router_settings = config.get("router_settings", None)
         if router_settings and isinstance(router_settings, dict):
@@ -3069,6 +3080,7 @@ async def chat_completion(
             type=getattr(e, "type", "None"),
             param=getattr(e, "param", "None"),
             code=getattr(e, "status_code", 500),
+            headers=getattr(e, "headers", {}),
         )
 
 
@@ -9322,10 +9334,30 @@ async def get_config():
         
         """
         for _callback in _success_callbacks:
-            if _callback == "openmeter":
-                env_vars = [
-                    "OPENMETER_API_KEY",
-                ]
+            if _callback != "langfuse":
+                if _callback == "openmeter":
+                    env_vars = [
+                        "OPENMETER_API_KEY",
+                    ]
+                elif _callback == "braintrust":
+                    env_vars = [
+                        "BRAINTRUST_API_KEY",
+                    ]
+                elif _callback == "traceloop":
+                    env_vars = ["TRACELOOP_API_KEY"]
+                elif _callback == "custom_callback_api":
+                    env_vars = ["GENERIC_LOGGER_ENDPOINT"]
+                elif _callback == "otel":
+                    env_vars = ["OTEL_EXPORTER", "OTEL_ENDPOINT", "OTEL_HEADERS"]
+                elif _callback == "langsmith":
+                    env_vars = [
+                        "LANGSMITH_API_KEY",
+                        "LANGSMITH_PROJECT",
+                        "LANGSMITH_DEFAULT_RUN_NAME",
+                    ]
+                else:
+                    env_vars = []
+
                 env_vars_dict = {}
                 for _var in env_vars:
                     env_variable = environment_variables.get(_var, None)
@@ -9432,8 +9464,8 @@ async def get_config():
         }
     except Exception as e:
         verbose_proxy_logger.error(
-            "litellm.proxy.proxy_server.get_config(): Exception occured - {}".format(
-                str(e)
+            "litellm.proxy.proxy_server.get_config(): Exception occured - {}\n{}".format(
+                str(e), traceback.format_exc()
             )
         )
         verbose_proxy_logger.debug(traceback.format_exc())
@@ -9597,6 +9629,7 @@ def cleanup_router_config_variables():
 
 
 app.include_router(router)
+app.include_router(fine_tuning_router)
 app.include_router(health_router)
 app.include_router(key_management_router)
 app.include_router(internal_user_router)

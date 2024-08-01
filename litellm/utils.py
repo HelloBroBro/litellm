@@ -5859,6 +5859,12 @@ def convert_to_model_response_object(
             if _response_headers is not None:
                 model_response_object._response_headers = _response_headers
 
+            special_keys = list(litellm.ModelResponse.model_fields.keys())
+            special_keys.append("usage")
+            for k, v in response_object.items():
+                if k not in special_keys:
+                    setattr(model_response_object, k, v)
+
             return model_response_object
         elif response_type == "embedding" and (
             model_response_object is None
@@ -7327,6 +7333,13 @@ def exception_type(
                             llm_provider="cohere",
                             model=model,
                             response=original_exception.response,
+                        )
+                    elif original_exception.status_code == 408:
+                        exception_mapping_worked = True
+                        raise Timeout(
+                            message=f"CohereException - {original_exception.message}",
+                            llm_provider="cohere",
+                            model=model,
                         )
                     elif original_exception.status_code == 500:
                         exception_mapping_worked = True
