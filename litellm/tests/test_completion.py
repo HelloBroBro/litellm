@@ -255,7 +255,7 @@ def predibase_mock_post(url, data=None, json=None, headers=None, timeout=None):
     return mock_response
 
 
-# @pytest.mark.skip(reason="local only test")
+# @pytest.mark.skip(reason="local-only test")
 @pytest.mark.asyncio
 async def test_completion_predibase():
     try:
@@ -304,6 +304,8 @@ def test_completion_claude():
         print(response.usage.completion_tokens)
         print(response["usage"]["completion_tokens"])
         # print("new cost tracking")
+    except litellm.RateLimitError as e:
+        pass
     except Exception as e:
         if "overloaded_error" in str(e):
             pass

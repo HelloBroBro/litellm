@@ -553,7 +553,8 @@ def function_setup(
             or call_type == CallTypes.transcription.value
         ):
             _file_name: BinaryIO = args[1] if len(args) > 1 else kwargs["file"]
-            messages = "audio_file"
+            file_name = getattr(_file_name, "name", "audio_file")
+            messages = file_name
         elif (
             call_type == CallTypes.aspeech.value or call_type == CallTypes.speech.value
         ):
@@ -1213,6 +1214,7 @@ def client(original_function):
                             hidden_params = {
                                 "model": "whisper-1",
                                 "custom_llm_provider": custom_llm_provider,
+                                "cache_hit": True,
                             }
                             cached_result = convert_to_model_response_object(
                                 response_object=cached_result,
@@ -5825,6 +5827,8 @@ def convert_to_model_response_object(
                 model_response_object.usage.completion_tokens = response_object["usage"].get("completion_tokens", 0)  # type: ignore
                 model_response_object.usage.prompt_tokens = response_object["usage"].get("prompt_tokens", 0)  # type: ignore
                 model_response_object.usage.total_tokens = response_object["usage"].get("total_tokens", 0)  # type: ignore
+                model_response_object.usage.prompt_cache_hit_tokens = response_object["usage"].get("prompt_cache_hit_tokens", None)  # type: ignore
+                model_response_object.usage.prompt_cache_miss_tokens = response_object["usage"].get("prompt_cache_miss_tokens", None)  # type: ignore
 
             if "created" in response_object:
                 model_response_object.created = response_object["created"] or int(
@@ -9711,7 +9715,7 @@ class CustomStreamWrapper:
                 print_verbose(f"completion obj content: {completion_obj['content']}")
                 if response_obj["is_finished"]:
                     self.received_finish_reason = response_obj["finish_reason"]
-                if response_obj["usage"] is not None:
+                if "usage" in response_obj is not None:
                     model_response.usage = litellm.Usage(
                         prompt_tokens=response_obj["usage"].prompt_tokens,
                         completion_tokens=response_obj["usage"].completion_tokens,
@@ -10174,7 +10178,7 @@ class CustomStreamWrapper:
                 processed_chunk = self.finish_reason_handler()
                 if self.stream_options is None:  # add usage as hidden param
                     usage = calculate_total_usage(chunks=self.chunks)
-                setattr(processed_chunk, "usage", usage)
+                    processed_chunk._hidden_params["usage"] = usage
                 ## LOGGING
                 threading.Thread(
                     target=self.logging_obj.success_handler,
