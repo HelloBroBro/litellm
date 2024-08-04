@@ -23,7 +23,7 @@ from litellm import RateLimitError, Timeout, completion, completion_cost, embedd
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
 from litellm.llms.prompt_templates.factory import anthropic_messages_pt
 
-# litellm.num_retries = 3
+# litellm.num_retries=3
 litellm.cache = None
 litellm.success_callback = []
 user_message = "Write a short poem about the sky"
@@ -340,6 +340,36 @@ def test_completion_empower():
         )
         # Add any assertions, here to check response args
         print(response)
+    except Exception as e:
+        pytest.fail(f"Error occurred: {e}")
+
+
+def test_completion_github_api():
+    litellm.set_verbose = True
+    messages = [
+        {
+            "role": "user",
+            "content": "\nWhat is the query for `console.log` => `console.error`\n",
+        },
+        {
+            "role": "assistant",
+            "content": "\nThis is the GritQL query for the given before/after examples:\n<gritql>\n`console.log` => `console.error`\n</gritql>\n",
+        },
+        {
+            "role": "user",
+            "content": "\nWhat is the query for `console.info` => `consdole.heaven`\n",
+        },
+    ]
+    try:
+        # test without max tokens
+        response = completion(
+            model="github/gpt-4o",
+            messages=messages,
+        )
+        # Add any assertions, here to check response args
+        print(response)
+    except litellm.AuthenticationError:
+        pass
     except Exception as e:
         pytest.fail(f"Error occurred: {e}")
 
