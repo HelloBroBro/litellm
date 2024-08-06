@@ -138,8 +138,10 @@ from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
 from litellm.proxy.caching_routes import router as caching_router
 from litellm.proxy.common_utils.admin_ui_utils import (
     html_form,
+    setup_admin_ui_on_server_root_path,
     show_missing_vars_in_env,
 )
+from litellm.proxy.common_utils.debug_utils import init_verbose_loggers
 from litellm.proxy.common_utils.debug_utils import router as debugging_endpoints_router
 from litellm.proxy.common_utils.encrypt_decrypt_utils import (
     decrypt_value_helper,
@@ -281,9 +283,12 @@ except Exception as e:
     except Exception as e:
         pass
 
+server_root_path = os.getenv("SERVER_ROOT_PATH", "")
+if server_root_path != "":
+    setup_admin_ui_on_server_root_path()
 _license_check = LicenseCheck()
 premium_user: bool = _license_check.is_premium()
-ui_link = f"/ui/"
+ui_link = f"{server_root_path}/ui/"
 ui_message = (
     f"👉 [```LiteLLM Admin Panel on /ui```]({ui_link}). Create, Edit Keys with SSO"
 )
@@ -303,14 +308,13 @@ _description = (
     else f"Proxy Server to call 100+ LLMs in the OpenAI format. {custom_swagger_message}\n\n{ui_message}"
 )
 
+
 app = FastAPI(
     docs_url=_docs_url,
     title=_title,
     description=_description,
     version=version,
-    root_path=os.environ.get(
-        "SERVER_ROOT_PATH", ""
-    ),  # check if user passed root path, FastAPI defaults this value to ""
+    root_path=server_root_path,  # check if user passed root path, FastAPI defaults this value to ""
 )
 
 
@@ -2543,6 +2547,8 @@ def giveup(e):
 async def startup_event():
     global prisma_client, master_key, use_background_health_checks, llm_router, llm_model_list, general_settings, proxy_budget_rescheduler_min_time, proxy_budget_rescheduler_max_time, litellm_proxy_admin_name, db_writer_client, store_model_in_db, premium_user, _license_check
     import json
+
+    init_verbose_loggers()
 
     ### LOAD MASTER KEY ###
     # check if master key set in environment - load from there
