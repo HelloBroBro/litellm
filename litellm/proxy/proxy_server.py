@@ -138,7 +138,6 @@ from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
 from litellm.proxy.caching_routes import router as caching_router
 from litellm.proxy.common_utils.admin_ui_utils import (
     html_form,
-    setup_admin_ui_on_server_root_path,
     show_missing_vars_in_env,
 )
 from litellm.proxy.common_utils.debug_utils import init_verbose_loggers
@@ -284,8 +283,7 @@ except Exception as e:
         pass
 
 server_root_path = os.getenv("SERVER_ROOT_PATH", "")
-if server_root_path != "":
-    setup_admin_ui_on_server_root_path()
+print("server root path: ", server_root_path)  # noqa
 _license_check = LicenseCheck()
 premium_user: bool = _license_check.is_premium()
 ui_link = f"{server_root_path}/ui/"
@@ -387,6 +385,21 @@ try:
             src = os.path.join(ui_path, filename)
             dst = os.path.join(folder_path, "index.html")
             os.rename(src, dst)
+
+    if server_root_path != "":
+        print(  # noqa
+            f"server_root_path is set, forwarding any /ui requests to {server_root_path}/ui"
+        )  # noqa
+        if os.getenv("PROXY_BASE_URL") is None:
+            os.environ["PROXY_BASE_URL"] = server_root_path
+
+        @app.middleware("http")
+        async def redirect_ui_middleware(request: Request, call_next):
+            if request.url.path.startswith("/ui"):
+                new_path = request.url.path.replace("/ui", f"{server_root_path}/ui", 1)
+                return RedirectResponse(new_path)
+            return await call_next(request)
+
 except:
     pass
 app.add_middleware(
@@ -2103,13 +2116,18 @@ class ProxyConfig:
                 for alert in _general_settings["alerting"]:
                     if alert not in general_settings["alerting"]:
                         general_settings["alerting"].append(alert)
-
                 proxy_logging_obj.alerting = general_settings["alerting"]
                 proxy_logging_obj.slack_alerting_instance.alerting = general_settings[
                     "alerting"
                 ]
             elif general_settings is None:
                 general_settings = {}
+                general_settings["alerting"] = _general_settings["alerting"]
+                proxy_logging_obj.alerting = general_settings["alerting"]
+                proxy_logging_obj.slack_alerting_instance.alerting = general_settings[
+                    "alerting"
+                ]
+            elif isinstance(general_settings, dict):
                 general_settings["alerting"] = _general_settings["alerting"]
                 proxy_logging_obj.alerting = general_settings["alerting"]
                 proxy_logging_obj.slack_alerting_instance.alerting = general_settings[
@@ -8556,6 +8574,19 @@ async def auth_callback(request: Request):
     # User is Authe'd in - generate key for the UI to access Proxy
     user_email = getattr(result, "email", None)
     user_id = getattr(result, "id", None)
+
+    if user_email is not None and os.getenv("ALLOWED_EMAIL_DOMAINS") is not None:
+        email_domain = user_email.split("@")[1]
+        allowed_domains = os.getenv("ALLOWED_EMAIL_DOMAINS").split(",")  # type: ignore
+        if email_domain not in allowed_domains:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "message": "The email domain={}, is not an allowed email domain={}. Contact your admin to change this.".format(
+                        email_domain, allowed_domains
+                    )
+                },
+            )
 
     # generic client id
     if generic_client_id is not None:
