@@ -204,6 +204,7 @@ const sidebars = {
         "sdk_custom_pricing",
         "budget_manager",
         "caching/all_caches",
+        "migration",
         {
           type: "category",
           label: "LangChain, LlamaIndex, Instructor Integration",
@@ -264,6 +265,7 @@ const sidebars = {
       items: [
         "extras/contributing",
         "data_security",
+        "migration_policy",
         "contributing",
         "rules",
         "proxy_server",
@@ -296,7 +298,6 @@ const sidebars = {
         },
       ],
     },
-    "migration",
     "troubleshoot",
   ],
 };
