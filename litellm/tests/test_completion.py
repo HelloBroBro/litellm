@@ -14,7 +14,7 @@ sys.path.insert(
 )  # Adds the parent directory to the system path
 
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -180,6 +180,31 @@ def test_completion_azure_command_r():
             model="azure/command-r-plus",
             api_base=os.getenv("AZURE_COHERE_API_BASE"),
             api_key=os.getenv("AZURE_COHERE_API_KEY"),
+            messages=[{"role": "user", "content": "What is the meaning of life?"}],
+        )
+
+        print(response)
+    except litellm.Timeout as e:
+        pass
+    except Exception as e:
+        pytest.fail(f"Error occurred: {e}")
+
+
+@pytest.mark.parametrize(
+    "api_base",
+    [
+        "https://litellm8397336933.openai.azure.com",
+        "https://litellm8397336933.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2023-03-15-preview",
+    ],
+)
+def test_completion_azure_ai_gpt_4o(api_base):
+    try:
+        litellm.set_verbose = True
+
+        response = completion(
+            model="azure_ai/gpt-4o",
+            api_base=api_base,
+            api_key=os.getenv("AZURE_AI_OPENAI_KEY"),
             messages=[{"role": "user", "content": "What is the meaning of life?"}],
         )
 
@@ -3449,7 +3474,6 @@ def response_format_tests(response: litellm.ModelResponse):
     assert isinstance(response.usage.total_tokens, int)  # type: ignore
 
 
-@pytest.mark.parametrize("sync_mode", [True, False])
 @pytest.mark.parametrize(
     "model",
     [
@@ -3463,6 +3487,7 @@ def response_format_tests(response: litellm.ModelResponse):
         "cohere.command-text-v14",
     ],
 )
+@pytest.mark.parametrize("sync_mode", [True, False])
 @pytest.mark.asyncio
 async def test_completion_bedrock_httpx_models(sync_mode, model):
     litellm.set_verbose = True
@@ -3705,19 +3730,21 @@ def test_completion_anyscale_api():
 # test_completion_anyscale_api()
 
 
-@pytest.mark.skip(reason="flaky test, times out frequently")
+# @pytest.mark.skip(reason="flaky test, times out frequently")
 def test_completion_cohere():
     try:
         # litellm.set_verbose=True
         messages = [
             {"role": "system", "content": "You're a good bot"},
+            {"role": "assistant", "content": [{"text": "2", "type": "text"}]},
+            {"role": "assistant", "content": [{"text": "3", "type": "text"}]},
             {
                 "role": "user",
                 "content": "Hey",
             },
         ]
         response = completion(
-            model="command-nightly",
+            model="command-r",
             messages=messages,
         )
         print(response)
