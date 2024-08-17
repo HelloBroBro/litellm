@@ -13,7 +13,15 @@ import traceback
 import uuid
 import warnings
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    List,
+    Optional,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 import requests
 
@@ -186,6 +194,9 @@ from litellm.proxy.openai_files_endpoints.files_endpoints import (
 from litellm.proxy.openai_files_endpoints.files_endpoints import set_files_config
 from litellm.proxy.pass_through_endpoints.pass_through_endpoints import (
     initialize_pass_through_endpoints,
+)
+from litellm.proxy.pass_through_endpoints.pass_through_endpoints import (
+    router as pass_through_router,
 )
 from litellm.proxy.route_llm_request import route_request
 from litellm.proxy.secret_managers.aws_secret_manager import (
@@ -550,6 +561,37 @@ async def check_request_disconnection(request: Request, llm_api_call_task):
             )
 
 
+def _resolve_typed_dict_type(typ):
+    """Resolve the actual TypedDict class from a potentially wrapped type."""
+    from typing_extensions import _TypedDictMeta  # type: ignore
+
+    origin = get_origin(typ)
+    if origin is Union:  # Check if it's a Union (like Optional)
+        for arg in get_args(typ):
+            if isinstance(arg, _TypedDictMeta):
+                return arg
+    elif isinstance(typ, type) and isinstance(typ, dict):
+        return typ
+    return None
+
+
+def _resolve_pydantic_type(typ) -> List:
+    """Resolve the actual TypedDict class from a potentially wrapped type."""
+    origin = get_origin(typ)
+    typs = []
+    if origin is Union:  # Check if it's a Union (like Optional)
+        for arg in get_args(typ):
+            if (
+                arg is not None
+                and not isinstance(arg, type(None))
+                and "NoneType" not in str(arg)
+            ):
+                typs.append(arg)
+    elif isinstance(typ, type) and isinstance(typ, BaseModel):
+        return [typ]
+    return typs
+
+
 def prisma_setup(database_url: Optional[str]):
     global prisma_client, proxy_logging_obj, user_api_key_cache
 
@@ -870,8 +912,8 @@ async def update_database(
                         + prisma_client.key_list_transactons.get(hashed_token, 0)
                     )
             except Exception as e:
-                verbose_proxy_logger.error(
-                    f"Update Key DB Call failed to execute - {str(e)}\n{traceback.format_exc()}"
+                verbose_proxy_logger.exception(
+                    f"Update Key DB Call failed to execute - {str(e)}"
                 )
                 raise e
 
@@ -1163,8 +1205,8 @@ async def update_cache(
                 existing_spend_obj.spend = new_spend
                 user_api_key_cache.set_cache(key=_id, value=existing_spend_obj.json())
         except Exception as e:
-            verbose_proxy_logger.error(
-                f"An error occurred updating end user cache: {str(e)}\n\n{traceback.format_exc()}"
+            verbose_proxy_logger.exception(
+                f"An error occurred updating end user cache: {str(e)}"
             )
 
     ### UPDATE TEAM SPEND ###
@@ -1205,8 +1247,8 @@ async def update_cache(
                 existing_spend_obj.spend = new_spend
                 user_api_key_cache.set_cache(key=_id, value=existing_spend_obj)
         except Exception as e:
-            verbose_proxy_logger.error(
-                f"An error occurred updating end user cache: {str(e)}\n\n{traceback.format_exc()}"
+            verbose_proxy_logger.exception(
+                f"An error occurred updating end user cache: {str(e)}"
             )
 
     if token is not None and response_cost is not None:
@@ -2073,7 +2115,7 @@ class ProxyConfig:
                 self._add_deployment(db_models=new_models)
 
         except Exception as e:
-            verbose_proxy_logger.error(
+            verbose_proxy_logger.exception(
                 f"Error adding/deleting model to llm_router: {str(e)}"
             )
 
@@ -2192,6 +2234,15 @@ class ProxyConfig:
                 alerting_args=general_settings["alerting_args"],
             )
 
+        ## PASS-THROUGH ENDPOINTS ##
+        if "pass_through_endpoints" in _general_settings:
+            general_settings["pass_through_endpoints"] = _general_settings[
+                "pass_through_endpoints"
+            ]
+            await initialize_pass_through_endpoints(
+                pass_through_endpoints=general_settings["pass_through_endpoints"]
+            )
+
     async def add_deployment(
         self,
         prisma_client: PrismaClient,
@@ -2212,7 +2263,7 @@ class ProxyConfig:
             try:
                 new_models = await prisma_client.db.litellm_proxymodeltable.find_many()
             except Exception as e:
-                verbose_proxy_logger.error(
+                verbose_proxy_logger.exception(
                     "litellm.proxy_server.py::add_deployment() - Error getting new models from DB - {}".format(
                         str(e)
                     )
@@ -2234,8 +2285,10 @@ class ProxyConfig:
                 )
 
         except Exception as e:
-            verbose_proxy_logger.error(
-                "{}\nTraceback:{}".format(str(e), traceback.format_exc())
+            verbose_proxy_logger.exception(
+                "litellm.proxy.proxy_server.py::ProxyConfig:add_deployment - {}".format(
+                    str(e)
+                )
             )
 
 
@@ -2402,12 +2455,11 @@ async def async_assistants_data_generator(
         done_message = "[DONE]"
         yield f"data: {done_message}\n\n"
     except Exception as e:
-        verbose_proxy_logger.error(
+        verbose_proxy_logger.exception(
             "litellm.proxy.proxy_server.async_assistants_data_generator(): Exception occured - {}".format(
                 str(e)
             )
         )
-        verbose_proxy_logger.debug(traceback.format_exc())
         await proxy_logging_obj.post_call_failure_hook(
             user_api_key_dict=user_api_key_dict,
             original_exception=e,
@@ -2460,9 +2512,9 @@ async def async_data_generator(
         done_message = "[DONE]"
         yield f"data: {done_message}\n\n"
     except Exception as e:
-        verbose_proxy_logger.error(
-            "litellm.proxy.proxy_server.async_data_generator(): Exception occured - {}\n{}".format(
-                str(e), traceback.format_exc()
+        verbose_proxy_logger.exception(
+            "litellm.proxy.proxy_server.async_data_generator(): Exception occured - {}".format(
+                str(e)
             )
         )
         await proxy_logging_obj.post_call_failure_hook(
@@ -2513,9 +2565,9 @@ async def async_data_generator_anthropic(
             except Exception as e:
                 yield f"event: {event_type}\ndata:{str(e)}\n\n"
     except Exception as e:
-        verbose_proxy_logger.error(
-            "litellm.proxy.proxy_server.async_data_generator(): Exception occured - {}\n{}".format(
-                str(e), traceback.format_exc()
+        verbose_proxy_logger.exception(
+            "litellm.proxy.proxy_server.async_data_generator(): Exception occured - {}".format(
+                str(e)
             )
         )
         await proxy_logging_obj.post_call_failure_hook(
@@ -3129,10 +3181,8 @@ async def chat_completion(
         _chat_response.usage = _usage  # type: ignore
         return _chat_response
     except Exception as e:
-        verbose_proxy_logger.error(
-            "litellm.proxy.proxy_server.chat_completion(): Exception occured - {}\n{}".format(
-                get_error_message_str(e=e), traceback.format_exc()
-            )
+        verbose_proxy_logger.exception(
+            f"litellm.proxy.proxy_server.chat_completion(): Exception occured - {str(e)}"
         )
         await proxy_logging_obj.post_call_failure_hook(
             user_api_key_dict=user_api_key_dict, original_exception=e, request_data=data
@@ -3515,12 +3565,11 @@ async def embeddings(
             e,
             litellm_debug_info,
         )
-        verbose_proxy_logger.error(
-            "litellm.proxy.proxy_server.embeddings(): Exception occured - {}\n{}".format(
-                str(e), traceback.format_exc()
+        verbose_proxy_logger.exception(
+            "litellm.proxy.proxy_server.embeddings(): Exception occured - {}".format(
+                str(e)
             )
         )
-        verbose_proxy_logger.debug(traceback.format_exc())
         if isinstance(e, HTTPException):
             message = get_error_message_str(e)
             raise ProxyException(
@@ -5329,9 +5378,9 @@ async def anthropic_response(
         await proxy_logging_obj.post_call_failure_hook(
             user_api_key_dict=user_api_key_dict, original_exception=e, request_data=data
         )
-        verbose_proxy_logger.error(
-            "litellm.proxy.proxy_server.anthropic_response(): Exception occured - {}\n{}".format(
-                str(e), traceback.format_exc()
+        verbose_proxy_logger.exception(
+            "litellm.proxy.proxy_server.anthropic_response(): Exception occured - {}".format(
+                str(e)
             )
         )
         error_msg = f"{str(e)}"
@@ -9162,6 +9211,7 @@ async def get_config_list(
         "global_max_parallel_requests": {"type": "Integer"},
         "max_request_size_mb": {"type": "Integer"},
         "max_response_size_mb": {"type": "Integer"},
+        "pass_through_endpoints": {"type": "PydanticModel"},
     }
 
     return_val = []
@@ -9169,21 +9219,79 @@ async def get_config_list(
     for field_name, field_info in ConfigGeneralSettings.model_fields.items():
         if field_name in allowed_args:
 
-            _stored_in_db = None
-            if field_name in db_general_settings_dict:
-                _stored_in_db = True
-            elif field_name in general_settings:
-                _stored_in_db = False
+            ## HANDLE TYPED DICT
 
-            _response_obj = ConfigList(
-                field_name=field_name,
-                field_type=allowed_args[field_name]["type"],
-                field_description=field_info.description or "",
-                field_value=general_settings.get(field_name, None),
-                stored_in_db=_stored_in_db,
-                field_default_value=field_info.default,
-            )
-            return_val.append(_response_obj)
+            typed_dict_type = allowed_args[field_name]["type"]
+
+            if typed_dict_type == "PydanticModel":
+                if field_name == "pass_through_endpoints":
+                    pydantic_class_list = [PassThroughGenericEndpoint]
+                else:
+                    pydantic_class_list = []
+
+                for pydantic_class in pydantic_class_list:
+                    # Get type hints from the TypedDict to create FieldDetail objects
+                    nested_fields = [
+                        FieldDetail(
+                            field_name=sub_field,
+                            field_type=sub_field_type.__name__,
+                            field_description="",  # Add custom logic if descriptions are available
+                            field_default_value=general_settings.get(sub_field, None),
+                            stored_in_db=None,
+                        )
+                        for sub_field, sub_field_type in pydantic_class.__annotations__.items()
+                    ]
+
+                    idx = 0
+                    for (
+                        sub_field,
+                        sub_field_info,
+                    ) in pydantic_class.model_fields.items():
+                        if (
+                            hasattr(sub_field_info, "description")
+                            and sub_field_info.description is not None
+                        ):
+                            nested_fields[idx].field_description = (
+                                sub_field_info.description
+                            )
+                        idx += 1
+
+                    _stored_in_db = None
+                    if field_name in db_general_settings_dict:
+                        _stored_in_db = True
+                    elif field_name in general_settings:
+                        _stored_in_db = False
+
+                    _response_obj = ConfigList(
+                        field_name=field_name,
+                        field_type=allowed_args[field_name]["type"],
+                        field_description=field_info.description or "",
+                        field_value=general_settings.get(field_name, None),
+                        stored_in_db=_stored_in_db,
+                        field_default_value=field_info.default,
+                        nested_fields=nested_fields,
+                    )
+                    return_val.append(_response_obj)
+
+            else:
+                nested_fields = None
+
+                _stored_in_db = None
+                if field_name in db_general_settings_dict:
+                    _stored_in_db = True
+                elif field_name in general_settings:
+                    _stored_in_db = False
+
+                _response_obj = ConfigList(
+                    field_name=field_name,
+                    field_type=allowed_args[field_name]["type"],
+                    field_description=field_info.description or "",
+                    field_value=general_settings.get(field_name, None),
+                    stored_in_db=_stored_in_db,
+                    field_default_value=field_info.default,
+                    nested_fields=nested_fields,
+                )
+                return_val.append(_response_obj)
 
     return return_val
 
@@ -9429,12 +9537,11 @@ async def get_config():
             "available_callbacks": all_available_callbacks,
         }
     except Exception as e:
-        verbose_proxy_logger.error(
-            "litellm.proxy.proxy_server.get_config(): Exception occured - {}\n{}".format(
-                str(e), traceback.format_exc()
+        verbose_proxy_logger.exception(
+            "litellm.proxy.proxy_server.get_config(): Exception occured - {}".format(
+                str(e)
             )
         )
-        verbose_proxy_logger.debug(traceback.format_exc())
         if isinstance(e, HTTPException):
             raise ProxyException(
                 message=getattr(e, "detail", f"Authentication Error({str(e)})"),
@@ -9597,6 +9704,7 @@ def cleanup_router_config_variables():
 app.include_router(router)
 app.include_router(fine_tuning_router)
 app.include_router(vertex_router)
+app.include_router(pass_through_router)
 app.include_router(health_router)
 app.include_router(key_management_router)
 app.include_router(internal_user_router)
