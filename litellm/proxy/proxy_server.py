@@ -148,6 +148,10 @@ from litellm.proxy.common_utils.admin_ui_utils import (
     html_form,
     show_missing_vars_in_env,
 )
+from litellm.proxy.common_utils.callback_utils import (
+    get_remaining_tokens_and_requests_from_request_data,
+    initialize_callbacks_on_proxy,
+)
 from litellm.proxy.common_utils.debug_utils import init_verbose_loggers
 from litellm.proxy.common_utils.debug_utils import router as debugging_endpoints_router
 from litellm.proxy.common_utils.encrypt_decrypt_utils import (
@@ -158,7 +162,6 @@ from litellm.proxy.common_utils.http_parsing_utils import (
     _read_request_body,
     check_file_size_under_limit,
 )
-from litellm.proxy.common_utils.init_callbacks import initialize_callbacks_on_proxy
 from litellm.proxy.common_utils.load_config_utils import get_file_contents_from_s3
 from litellm.proxy.common_utils.openai_endpoint_utils import (
     remove_sensitive_info_from_deployment,
@@ -226,6 +229,9 @@ from litellm.proxy.utils import (
     reset_budget,
     send_email,
     update_spend,
+)
+from litellm.proxy.vertex_ai_endpoints.google_ai_studio_endpoints import (
+    router as gemini_router,
 )
 from litellm.proxy.vertex_ai_endpoints.vertex_endpoints import router as vertex_router
 from litellm.proxy.vertex_ai_endpoints.vertex_endpoints import set_default_vertex_config
@@ -503,6 +509,7 @@ def get_custom_headers(
     model_region: Optional[str] = None,
     response_cost: Optional[Union[float, str]] = None,
     fastest_response_batch_completion: Optional[bool] = None,
+    request_data: Optional[dict] = {},
     **kwargs,
 ) -> dict:
     exclude_values = {"", None}
@@ -523,6 +530,12 @@ def get_custom_headers(
         ),
         **{k: str(v) for k, v in kwargs.items()},
     }
+    if request_data:
+        remaining_tokens_header = get_remaining_tokens_and_requests_from_request_data(
+            request_data
+        )
+        headers.update(remaining_tokens_header)
+
     try:
         return {
             key: value for key, value in headers.items() if value not in exclude_values
@@ -3107,6 +3120,7 @@ async def chat_completion(
                 response_cost=response_cost,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
                 fastest_response_batch_completion=fastest_response_batch_completion,
+                request_data=data,
                 **additional_headers,
             )
             selected_data_generator = select_data_generator(
@@ -3141,6 +3155,7 @@ async def chat_completion(
                 response_cost=response_cost,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
                 fastest_response_batch_completion=fastest_response_batch_completion,
+                request_data=data,
                 **additional_headers,
             )
         )
@@ -3322,6 +3337,7 @@ async def completion(
                 api_base=api_base,
                 version=version,
                 response_cost=response_cost,
+                request_data=data,
             )
             selected_data_generator = select_data_generator(
                 response=response,
@@ -3343,6 +3359,7 @@ async def completion(
                 api_base=api_base,
                 version=version,
                 response_cost=response_cost,
+                request_data=data,
             )
         )
         await check_response_size_is_safe(response=response)
@@ -3550,6 +3567,7 @@ async def embeddings(
                 response_cost=response_cost,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
                 call_id=litellm_call_id,
+                request_data=data,
             )
         )
         await check_response_size_is_safe(response=response)
@@ -3676,6 +3694,7 @@ async def image_generation(
                 response_cost=response_cost,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
                 call_id=litellm_call_id,
+                request_data=data,
             )
         )
 
@@ -3797,6 +3816,7 @@ async def audio_speech(
             model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
             fastest_response_batch_completion=None,
             call_id=litellm_call_id,
+            request_data=data,
         )
 
         selected_data_generator = select_data_generator(
@@ -3934,6 +3954,7 @@ async def audio_transcriptions(
                 response_cost=response_cost,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
                 call_id=litellm_call_id,
+                request_data=data,
             )
         )
 
@@ -4037,6 +4058,7 @@ async def get_assistants(
                 api_base=api_base,
                 version=version,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+                request_data=data,
             )
         )
 
@@ -4132,6 +4154,7 @@ async def create_assistant(
                 api_base=api_base,
                 version=version,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+                request_data=data,
             )
         )
 
@@ -4227,6 +4250,7 @@ async def delete_assistant(
                 api_base=api_base,
                 version=version,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+                request_data=data,
             )
         )
 
@@ -4322,6 +4346,7 @@ async def create_threads(
                 api_base=api_base,
                 version=version,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+                request_data=data,
             )
         )
 
@@ -4416,6 +4441,7 @@ async def get_thread(
                 api_base=api_base,
                 version=version,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+                request_data=data,
             )
         )
 
@@ -4513,6 +4539,7 @@ async def add_messages(
                 api_base=api_base,
                 version=version,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+                request_data=data,
             )
         )
 
@@ -4606,6 +4633,7 @@ async def get_messages(
                 api_base=api_base,
                 version=version,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+                request_data=data,
             )
         )
 
@@ -4713,6 +4741,7 @@ async def run_thread(
                 api_base=api_base,
                 version=version,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+                request_data=data,
             )
         )
 
@@ -4835,6 +4864,7 @@ async def create_batch(
                 api_base=api_base,
                 version=version,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+                request_data=data,
             )
         )
 
@@ -4930,6 +4960,7 @@ async def retrieve_batch(
                 api_base=api_base,
                 version=version,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+                request_data=data,
             )
         )
 
@@ -5148,6 +5179,7 @@ async def moderations(
                 api_base=api_base,
                 version=version,
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
+                request_data=data,
             )
         )
 
@@ -5317,6 +5349,7 @@ async def anthropic_response(
                 api_base=api_base,
                 version=version,
                 response_cost=response_cost,
+                request_data=data,
             )
         )
 
@@ -9704,6 +9737,7 @@ def cleanup_router_config_variables():
 app.include_router(router)
 app.include_router(fine_tuning_router)
 app.include_router(vertex_router)
+app.include_router(gemini_router)
 app.include_router(pass_through_router)
 app.include_router(health_router)
 app.include_router(key_management_router)
