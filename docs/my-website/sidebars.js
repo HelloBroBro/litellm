@@ -193,7 +193,10 @@ const sidebars = {
         "fine_tuning",
         "anthropic_completion",
         "pass_through/vertex_ai",
-        "pass_through/google_ai_studio"
+        "pass_through/google_ai_studio",
+        "pass_through/cohere",
+        "pass_through/bedrock",
+        "pass_through/langfuse"
       ],
     },
     "scheduler",
@@ -248,6 +251,7 @@ const sidebars = {
       type: "category",
       label: "Tutorials",
       items: [
+        'tutorials/litellm_proxy_aporia',
         'tutorials/azure_openai',
         'tutorials/instructor',
         "tutorials/gradio_integration",
