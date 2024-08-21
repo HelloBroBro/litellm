@@ -582,9 +582,6 @@ class Logging:
                     or isinstance(result, HttpxBinaryResponseContent)  # tts
                 ):
                     ## RESPONSE COST ##
-                    custom_pricing = use_custom_pricing_for_model(
-                        litellm_params=self.litellm_params
-                    )
                     self.model_call_details["response_cost"] = (
                         self._response_cost_calculator(result=result)
                     )
@@ -689,23 +686,7 @@ class Logging:
                     complete_streaming_response
                 )
                 self.model_call_details["response_cost"] = (
-                    litellm.response_cost_calculator(
-                        response_object=complete_streaming_response,
-                        model=self.model,
-                        cache_hit=self.model_call_details.get("cache_hit", False),
-                        custom_llm_provider=self.model_call_details.get(
-                            "custom_llm_provider", None
-                        ),
-                        base_model=_get_base_model_from_metadata(
-                            model_call_details=self.model_call_details
-                        ),
-                        call_type=self.call_type,
-                        optional_params=(
-                            self.optional_params
-                            if hasattr(self, "optional_params")
-                            else {}
-                        ),
-                    )
+                    self._response_cost_calculator(result=complete_streaming_response)
                 )
             if self.dynamic_success_callbacks is not None and isinstance(
                 self.dynamic_success_callbacks, list
@@ -1308,9 +1289,10 @@ class Logging:
                         model_call_details=self.model_call_details
                     )
                     # base_model defaults to None if not set on model_info
-                    self.model_call_details["response_cost"] = litellm.completion_cost(
-                        completion_response=complete_streaming_response,
-                        model=base_model,
+                    self.model_call_details["response_cost"] = (
+                        self._response_cost_calculator(
+                            result=complete_streaming_response
+                        )
                     )
                 verbose_logger.debug(
                     f"Model={self.model}; cost={self.model_call_details['response_cost']}"
@@ -2174,6 +2156,9 @@ def get_custom_logger_compatible_class(
 def use_custom_pricing_for_model(litellm_params: Optional[dict]) -> bool:
     if litellm_params is None:
         return False
+    for k, v in litellm_params.items():
+        if k in SPECIAL_MODEL_INFO_PARAMS and v is not None:
+            return True
     metadata: Optional[dict] = litellm_params.get("metadata", {})
     if metadata is None:
         return False
@@ -2182,6 +2167,7 @@ def use_custom_pricing_for_model(litellm_params: Optional[dict]) -> bool:
         for k, v in model_info.items():
             if k in SPECIAL_MODEL_INFO_PARAMS:
                 return True
+
     return False
 
 

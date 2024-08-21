@@ -837,19 +837,19 @@ def client(original_function):
                 and kwargs.get("atranscription", False) != True
             ):  # allow users to control returning cached responses from the completion function
                 # checking cache
-                print_verbose(f"INSIDE CHECKING CACHE")
+                print_verbose("INSIDE CHECKING CACHE")
                 if (
                     litellm.cache is not None
                     and str(original_function.__name__)
                     in litellm.cache.supported_call_types
                 ):
-                    print_verbose(f"Checking Cache")
+                    print_verbose("Checking Cache")
                     preset_cache_key = litellm.cache.get_cache_key(*args, **kwargs)
                     kwargs["preset_cache_key"] = (
                         preset_cache_key  # for streaming calls, we need to pass the preset_cache_key
                     )
                     cached_result = litellm.cache.get_cache(*args, **kwargs)
-                    if cached_result != None:
+                    if cached_result is not None:
                         if "detail" in cached_result:
                             # implies an error occurred
                             pass
@@ -965,10 +965,10 @@ def client(original_function):
             # MODEL CALL
             result = original_function(*args, **kwargs)
             end_time = datetime.datetime.now()
-            if "stream" in kwargs and kwargs["stream"] == True:
+            if "stream" in kwargs and kwargs["stream"] is True:
                 if (
                     "complete_response" in kwargs
-                    and kwargs["complete_response"] == True
+                    and kwargs["complete_response"] is True
                 ):
                     chunks = []
                     for idx, chunk in enumerate(result):
@@ -978,15 +978,15 @@ def client(original_function):
                     )
                 else:
                     return result
-            elif "acompletion" in kwargs and kwargs["acompletion"] == True:
+            elif "acompletion" in kwargs and kwargs["acompletion"] is True:
                 return result
-            elif "aembedding" in kwargs and kwargs["aembedding"] == True:
+            elif "aembedding" in kwargs and kwargs["aembedding"] is True:
                 return result
-            elif "aimg_generation" in kwargs and kwargs["aimg_generation"] == True:
+            elif "aimg_generation" in kwargs and kwargs["aimg_generation"] is True:
                 return result
-            elif "atranscription" in kwargs and kwargs["atranscription"] == True:
+            elif "atranscription" in kwargs and kwargs["atranscription"] is True:
                 return result
-            elif "aspeech" in kwargs and kwargs["aspeech"] == True:
+            elif "aspeech" in kwargs and kwargs["aspeech"] is True:
                 return result
 
             ### POST-CALL RULES ###
@@ -1005,7 +1005,7 @@ def client(original_function):
                 litellm.cache.add_cache(result, *args, **kwargs)
 
             # LOG SUCCESS - handle streaming success logging in the _next_ object, remove `handle_success` once it's deprecated
-            verbose_logger.info(f"Wrapper: Completed Call, calling success_handler")
+            verbose_logger.info("Wrapper: Completed Call, calling success_handler")
             threading.Thread(
                 target=logging_obj.success_handler, args=(result, start_time, end_time)
             ).start()
@@ -1019,15 +1019,7 @@ def client(original_function):
                     optional_params=getattr(logging_obj, "optional_params", {}),
                 )
                 result._hidden_params["response_cost"] = (
-                    litellm.response_cost_calculator(
-                        response_object=result,
-                        model=getattr(logging_obj, "model", ""),
-                        custom_llm_provider=getattr(
-                            logging_obj, "custom_llm_provider", None
-                        ),
-                        call_type=getattr(logging_obj, "call_type", "completion"),
-                        optional_params=getattr(logging_obj, "optional_params", {}),
-                    )
+                    logging_obj._response_cost_calculator(result=result)
                 )
             result._response_ms = (
                 end_time - start_time
@@ -5203,19 +5195,43 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
             if custom_llm_provider == "predibase":
                 _model_info["supports_response_schema"] = True
 
+            _input_cost_per_token: Optional[float] = _model_info.get(
+                "input_cost_per_token"
+            )
+            if _input_cost_per_token is None:
+                # default value to 0, be noisy about this
+                verbose_logger.debug(
+                    "model={}, custom_llm_provider={} has no input_cost_per_token in model_cost_map. Defaulting to 0.".format(
+                        model, custom_llm_provider
+                    )
+                )
+                _input_cost_per_token = 0
+
+            _output_cost_per_token: Optional[float] = _model_info.get(
+                "output_cost_per_token"
+            )
+            if _output_cost_per_token is None:
+                # default value to 0, be noisy about this
+                verbose_logger.debug(
+                    "model={}, custom_llm_provider={} has no output_cost_per_token in model_cost_map. Defaulting to 0.".format(
+                        model, custom_llm_provider
+                    )
+                )
+                _output_cost_per_token = 0
+
             return ModelInfo(
                 key=key,
                 max_tokens=_model_info.get("max_tokens", None),
                 max_input_tokens=_model_info.get("max_input_tokens", None),
                 max_output_tokens=_model_info.get("max_output_tokens", None),
-                input_cost_per_token=_model_info.get("input_cost_per_token", 0),
+                input_cost_per_token=_input_cost_per_token,
                 input_cost_per_character=_model_info.get(
                     "input_cost_per_character", None
                 ),
                 input_cost_per_token_above_128k_tokens=_model_info.get(
                     "input_cost_per_token_above_128k_tokens", None
                 ),
-                output_cost_per_token=_model_info.get("output_cost_per_token", 0),
+                output_cost_per_token=_output_cost_per_token,
                 output_cost_per_character=_model_info.get(
                     "output_cost_per_character", None
                 ),
@@ -5907,6 +5923,9 @@ def convert_to_model_response_object(
     end_time=None,
     hidden_params: Optional[dict] = None,
     _response_headers: Optional[dict] = None,
+    convert_tool_call_to_json_mode: Optional[
+        bool
+    ] = None,  # used for supporting 'json_schema' on older models
 ):
     received_args = locals()
     if _response_headers is not None:
@@ -5945,7 +5964,7 @@ def convert_to_model_response_object(
         ):
             if response_object is None or model_response_object is None:
                 raise Exception("Error in response object format")
-            if stream == True:
+            if stream is True:
                 # for returning cached responses, we need to yield a generator
                 return convert_to_streaming_response(response_object=response_object)
             choice_list = []
@@ -5955,16 +5974,31 @@ def convert_to_model_response_object(
             )
 
             for idx, choice in enumerate(response_object["choices"]):
-                message = Message(
-                    content=choice["message"].get("content", None),
-                    role=choice["message"]["role"] or "assistant",
-                    function_call=choice["message"].get("function_call", None),
-                    tool_calls=choice["message"].get("tool_calls", None),
-                )
-                finish_reason = choice.get("finish_reason", None)
-                if finish_reason == None:
+                ## HANDLE JSON MODE - anthropic returns single function call]
+                tool_calls = choice["message"].get("tool_calls", None)
+                if (
+                    convert_tool_call_to_json_mode
+                    and tool_calls is not None
+                    and len(tool_calls) == 1
+                ):
+                    # to support 'json_schema' logic on older models
+                    json_mode_content_str: Optional[str] = tool_calls[0][
+                        "function"
+                    ].get("arguments")
+                    if json_mode_content_str is not None:
+                        message = litellm.Message(content=json_mode_content_str)
+                        finish_reason = "stop"
+                else:
+                    message = Message(
+                        content=choice["message"].get("content", None),
+                        role=choice["message"]["role"] or "assistant",
+                        function_call=choice["message"].get("function_call", None),
+                        tool_calls=choice["message"].get("tool_calls", None),
+                    )
+                    finish_reason = choice.get("finish_reason", None)
+                if finish_reason is None:
                     # gpt-4 vision can return 'finish_reason' or 'finish_details'
-                    finish_reason = choice.get("finish_details")
+                    finish_reason = choice.get("finish_details") or "stop"
                 logprobs = choice.get("logprobs", None)
                 enhancements = choice.get("enhancements", None)
                 choice = Choices(

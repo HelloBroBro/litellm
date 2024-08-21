@@ -2,9 +2,9 @@ import Image from '@theme/IdealImage';
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-# Use LiteLLM AI Gateway with Aporia Guardrails
+# Aporia
 
-In this tutorial we will use LiteLLM Proxy with Aporia to detect PII in requests and profanity in responses
+Use [Aporia](https://www.aporia.com/) to  detect PII in requests and profanity in responses
 
 ## 1. Setup guardrails on Aporia
 
@@ -15,26 +15,25 @@ Create two projects on [Aporia](https://guardrails.aporia.com/)
 1. Pre LLM API Call - Set all the policies you want to run on pre LLM API call 
 2. Post LLM API Call - Set all the policies you want to run post LLM API call
 
-
-<Image img={require('../../img/aporia_projs.png')} />
+<Image img={require('../../../img/aporia_projs.png')} />
 
 
 ### Pre-Call: Detect PII
 
 Add the `PII - Prompt` to your Pre LLM API Call project
 
-<Image img={require('../../img/aporia_pre.png')} />
+<Image img={require('../../../img/aporia_pre.png')} />
 
 ### Post-Call: Detect Profanity in Responses
 
 Add the `Toxicity - Response` to your Post LLM API Call project
 
-<Image img={require('../../img/aporia_post.png')} />
+<Image img={require('../../../img/aporia_post.png')} />
 
 
 ## 2. Define Guardrails on your LiteLLM config.yaml 
 
-- Define your guardrails under the `guardrails` section and set `pre_call_guardrails` and `post_call_guardrails`
+- Define your guardrails under the `guardrails` section
 ```yaml
 model_list:
   - model_name: gpt-3.5-turbo
@@ -136,7 +135,13 @@ curl -i http://localhost:4000/v1/chat/completions \
 
 </Tabs>
 
-## 5. Control Guardrails per Project (API Key)
+## 5. ✨ Control Guardrails per Project (API Key)
+
+:::info
+
+✨ This is an Enterprise only feature [Contact us to get a free trial](https://calendly.com/d/4mp-gd3-k5k/litellm-1-1-onboarding-chat)
+
+:::
 
 Use this to control what guardrails run per project. In this tutorial we only want the following guardrails to run for 1 project (API Key)
 - `guardrails`: ["aporia-pre-guard", "aporia-post-guard"]
