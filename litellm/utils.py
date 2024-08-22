@@ -121,7 +121,7 @@ import importlib.metadata
 from openai import OpenAIError as OriginalError
 
 from ._logging import verbose_logger
-from .caching import RedisCache, RedisSemanticCache, S3Cache
+from .caching import QdrantSemanticCache, RedisCache, RedisSemanticCache, S3Cache
 from .exceptions import (
     APIConnectionError,
     APIError,
@@ -541,7 +541,7 @@ def function_setup(
             call_type == CallTypes.embedding.value
             or call_type == CallTypes.aembedding.value
         ):
-            messages = args[1] if len(args) > 1 else kwargs["input"]
+            messages = args[1] if len(args) > 1 else kwargs.get("input", None)
         elif (
             call_type == CallTypes.image_generation.value
             or call_type == CallTypes.aimage_generation.value
@@ -1157,6 +1157,14 @@ def client(original_function):
                     elif isinstance(
                         litellm.cache.cache, RedisSemanticCache
                     ) or isinstance(litellm.cache.cache, RedisCache):
+                        preset_cache_key = litellm.cache.get_cache_key(*args, **kwargs)
+                        kwargs["preset_cache_key"] = (
+                            preset_cache_key  # for streaming calls, we need to pass the preset_cache_key
+                        )
+                        cached_result = await litellm.cache.async_get_cache(
+                            *args, **kwargs
+                        )
+                    elif isinstance(litellm.cache.cache, QdrantSemanticCache):
                         preset_cache_key = litellm.cache.get_cache_key(*args, **kwargs)
                         kwargs["preset_cache_key"] = (
                             preset_cache_key  # for streaming calls, we need to pass the preset_cache_key
@@ -2896,7 +2904,7 @@ def get_optional_params(
         unsupported_params = {}
         for k in non_default_params.keys():
             if k not in supported_params:
-                if k == "user" or k == "stream_options":
+                if k == "user" or k == "stream_options" or k == "stream":
                     continue
                 if k == "n" and n == 1:  # langchain sends n=1 as a default value
                     continue  # skip this param
@@ -2908,8 +2916,8 @@ def get_optional_params(
                 else:
                     unsupported_params[k] = non_default_params[k]
         if unsupported_params:
-            if litellm.drop_params == True or (
-                drop_params is not None and drop_params == True
+            if litellm.drop_params is True or (
+                drop_params is not None and drop_params is True
             ):
                 pass
             else:
@@ -3137,7 +3145,6 @@ def get_optional_params(
         or model in litellm.vertex_embedding_models
         or model in litellm.vertex_vision_models
     ):
-        print_verbose(f"(start) INSIDE THE VERTEX AI OPTIONAL PARAM BLOCK")
         ## check if unsupported param passed in
         supported_params = get_supported_openai_params(
             model=model, custom_llm_provider=custom_llm_provider
@@ -3149,9 +3156,8 @@ def get_optional_params(
             optional_params=optional_params,
         )
 
-        print_verbose(
-            f"(end) INSIDE THE VERTEX AI OPTIONAL PARAM BLOCK - optional_params: {optional_params}"
-        )
+        if litellm.vertex_ai_safety_settings is not None:
+            optional_params["safety_settings"] = litellm.vertex_ai_safety_settings
     elif custom_llm_provider == "gemini":
         supported_params = get_supported_openai_params(
             model=model, custom_llm_provider=custom_llm_provider
@@ -3162,7 +3168,7 @@ def get_optional_params(
             optional_params=optional_params,
             model=model,
         )
-    elif custom_llm_provider == "vertex_ai_beta" or custom_llm_provider == "gemini":
+    elif custom_llm_provider == "vertex_ai_beta":
         supported_params = get_supported_openai_params(
             model=model, custom_llm_provider=custom_llm_provider
         )
@@ -3177,6 +3183,8 @@ def get_optional_params(
                 else False
             ),
         )
+        if litellm.vertex_ai_safety_settings is not None:
+            optional_params["safety_settings"] = litellm.vertex_ai_safety_settings
     elif (
         custom_llm_provider == "vertex_ai" and model in litellm.vertex_anthropic_models
     ):
@@ -8614,7 +8622,9 @@ def get_secret(
                     return secret_value_as_bool
                 else:
                     return secret
-            except:
+            except Exception:
+                if default_value is not None:
+                    return default_value
                 return secret
     except Exception as e:
         if default_value is not None:
