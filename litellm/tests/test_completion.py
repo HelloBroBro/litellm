@@ -23,7 +23,7 @@ from litellm import RateLimitError, Timeout, completion, completion_cost, embedd
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
 from litellm.llms.prompt_templates.factory import anthropic_messages_pt
 
-# litellm.num_retries=3
+# litellm.num_retries = 3
 litellm.cache = None
 litellm.success_callback = []
 user_message = "Write a short poem about the sky"
@@ -3653,6 +3653,7 @@ def test_completion_cohere():
         response = completion(
             model="command-r",
             messages=messages,
+            extra_headers={"Helicone-Property-Locale": "ko"},
         )
         print(response)
     except Exception as e:

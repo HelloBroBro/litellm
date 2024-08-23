@@ -1498,6 +1498,11 @@ class ProxyConfig:
                     litellm.get_secret(secret_name=key, default_value=value)
                 )
 
+            # check if litellm_license in general_settings
+            if "LITELLM_LICENSE" in environment_variables:
+                _license_check.license_str = os.getenv("LITELLM_LICENSE", None)
+                premium_user = _license_check.is_premium()
+
         ## LITELLM MODULE SETTINGS (e.g. litellm.drop_params=True,..)
         litellm_settings = config.get("litellm_settings", None)
         if litellm_settings is None:
@@ -1583,7 +1588,7 @@ class ProxyConfig:
                         verbose_proxy_logger.debug(  # noqa
                             f"{blue_color_code}Set Cache on LiteLLM Proxy: {vars(litellm.cache.cache)}{reset_color_code}"
                         )
-                elif key == "cache" and value == False:
+                elif key == "cache" and value is False:
                     pass
                 elif key == "guardrails":
                     if premium_user is not True:
@@ -1877,6 +1882,11 @@ class ProxyConfig:
                     "Trying to use `enforced_params`"
                     + CommonProxyErrors.not_premium_user.value
                 )
+
+            # check if litellm_license in general_settings
+            if "litellm_license" in general_settings:
+                _license_check.license_str = general_settings["litellm_license"]
+                premium_user = _license_check.is_premium()
 
         router_params: dict = {
             "cache_responses": litellm.cache
@@ -2662,6 +2672,13 @@ def giveup(e):
         and isinstance(e.message, str)
         and "Max parallel request limit reached" in e.message
     )
+
+    if (
+        general_settings.get("disable_retry_on_max_parallel_request_limit_error")
+        is True
+    ):
+        return True  # giveup if queuing max parallel request limits is disabled
+
     if result:
         verbose_proxy_logger.info(json.dumps({"event": "giveup", "exception": str(e)}))
     return result
@@ -3014,6 +3031,29 @@ async def chat_completion(
     model: Optional[str] = None,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
+    """
+
+    Follows the exact same API spec as `OpenAI's Chat API https://platform.openai.com/docs/api-reference/chat`
+
+    ```bash
+    curl -X POST http://localhost:4000/v1/chat/completions \
+
+    -H "Content-Type: application/json" \
+
+    -H "Authorization: Bearer sk-1234" \
+
+    -d '{
+        "model": "gpt-4o",
+        "messages": [
+            {
+                "role": "user",
+                "content": "Hello!"
+            }
+        ]
+    }'
+    ```
+
+    """
     global general_settings, user_debug, proxy_logging_obj, llm_model_list
 
     data = {}
@@ -3271,6 +3311,24 @@ async def completion(
     model: Optional[str] = None,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
+    """
+    Follows the exact same API spec as `OpenAI's Completions API https://platform.openai.com/docs/api-reference/completions`
+
+    ```bash
+    curl -X POST http://localhost:4000/v1/completions \
+
+    -H "Content-Type: application/json" \
+
+    -H "Authorization: Bearer sk-1234" \
+
+    -d '{
+        "model": "gpt-3.5-turbo-instruct",
+        "prompt": "Once upon a time",
+        "max_tokens": 50,
+        "temperature": 0.7
+    }'
+    ```
+    """
     global user_temperature, user_request_timeout, user_max_tokens, user_api_base
     data = {}
     try:
@@ -3477,6 +3535,23 @@ async def embeddings(
     model: Optional[str] = None,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
+    """
+    Follows the exact same API spec as `OpenAI's Embeddings API https://platform.openai.com/docs/api-reference/embeddings`
+
+    ```bash
+    curl -X POST http://localhost:4000/v1/embeddings \
+
+    -H "Content-Type: application/json" \
+
+    -H "Authorization: Bearer sk-1234" \
+
+    -d '{
+        "model": "text-embedding-ada-002",
+        "input": "The quick brown fox jumps over the lazy dog"
+    }'
+    ```
+
+"""
     global proxy_logging_obj
     data: Any = {}
     try:
@@ -4809,6 +4884,11 @@ async def run_thread(
 
 
 ######################################################################
+@router.get(
+    "/{provider}/v1/batches",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["batch"],
+)
 @router.post(
     "/v1/batches",
     dependencies=[Depends(user_api_key_auth)],
@@ -4822,6 +4902,7 @@ async def run_thread(
 async def create_batch(
     request: Request,
     fastapi_response: Response,
+    provider: Optional[str] = None,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
     """
@@ -4868,9 +4949,10 @@ async def create_batch(
 
         _create_batch_data = CreateBatchRequest(**data)
 
-        # for now use custom_llm_provider=="openai" -> this will change as LiteLLM adds more providers for acreate_batch
+        if provider is None:
+            provider = "openai"
         response = await litellm.acreate_batch(
-            custom_llm_provider="openai", **_create_batch_data
+            custom_llm_provider=provider, **_create_batch_data  # type: ignore
         )
 
         ### ALERTING ###
@@ -4927,6 +5009,11 @@ async def create_batch(
 
 
 @router.get(
+    "/{provider}/v1/batches/{batch_id:path}",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["batch"],
+)
+@router.get(
     "/v1/batches/{batch_id:path}",
     dependencies=[Depends(user_api_key_auth)],
     tags=["batch"],
@@ -4940,6 +5027,7 @@ async def retrieve_batch(
     request: Request,
     fastapi_response: Response,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+    provider: Optional[str] = None,
     batch_id: str = Path(
         title="Batch ID to retrieve", description="The ID of the batch to retrieve"
     ),
@@ -4964,9 +5052,10 @@ async def retrieve_batch(
             batch_id=batch_id,
         )
 
-        # for now use custom_llm_provider=="openai" -> this will change as LiteLLM adds more providers for acreate_batch
+        if provider is None:
+            provider = "openai"
         response = await litellm.aretrieve_batch(
-            custom_llm_provider="openai", **_retrieve_batch_request
+            custom_llm_provider=provider, **_retrieve_batch_request  # type: ignore
         )
 
         ### ALERTING ###
@@ -5024,6 +5113,11 @@ async def retrieve_batch(
 
 
 @router.get(
+    "/{provider}/v1/batches",
+    dependencies=[Depends(user_api_key_auth)],
+    tags=["batch"],
+)
+@router.get(
     "/v1/batches",
     dependencies=[Depends(user_api_key_auth)],
     tags=["batch"],
@@ -5035,6 +5129,7 @@ async def retrieve_batch(
 )
 async def list_batches(
     fastapi_response: Response,
+    provider: Optional[str] = None,
     limit: Optional[int] = None,
     after: Optional[str] = None,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
@@ -5055,9 +5150,10 @@ async def list_batches(
     global proxy_logging_obj
     verbose_proxy_logger.debug("GET /v1/batches after={} limit={}".format(after, limit))
     try:
-        # for now use custom_llm_provider=="openai" -> this will change as LiteLLM adds more providers for acreate_batch
+        if provider is None:
+            provider = "openai"
         response = await litellm.alist_batches(
-            custom_llm_provider="openai",
+            custom_llm_provider=provider,  # type: ignore
             after=after,
             limit=limit,
         )

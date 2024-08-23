@@ -54,6 +54,7 @@ def get_current_weather(location, unit="fahrenheit"):
 )
 def test_parallel_function_call(model):
     try:
+        litellm.set_verbose = True
         # Step 1: send the conversation and available functions to the model
         messages = [
             {
@@ -324,6 +325,7 @@ def test_groq_parallel_function_call():
                         location=function_args.get("location"),
                         unit=function_args.get("unit"),
                     )
+
                     messages.append(
                         {
                             "tool_call_id": tool_call.id,
