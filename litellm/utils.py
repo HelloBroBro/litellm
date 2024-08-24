@@ -2687,6 +2687,24 @@ def get_optional_params_embeddings(
     return final_params
 
 
+def _remove_additional_properties(schema):
+    if isinstance(schema, dict):
+        # Remove the 'additionalProperties' key if it exists and is set to False
+        if "additionalProperties" in schema and schema["additionalProperties"] is False:
+            del schema["additionalProperties"]
+
+        # Recursively process all dictionary values
+        for key, value in schema.items():
+            _remove_additional_properties(value)
+
+    elif isinstance(schema, list):
+        # Recursively process all items in the list
+        for item in schema:
+            _remove_additional_properties(item)
+
+    return schema
+
+
 def get_optional_params(
     # use the openai defaults
     # https://platform.openai.com/docs/api-reference/chat/create
@@ -2874,7 +2892,21 @@ def get_optional_params(
         non_default_params["response_format"] = type_to_response_format_param(
             response_format=non_default_params["response_format"]
         )
-
+        # # clean out 'additionalProperties = False'. Causes vertexai/gemini OpenAI API Schema errors - https://github.com/langchain-ai/langchainjs/issues/5240
+        if non_default_params["response_format"].get("json_schema", {}).get(
+            "schema"
+        ) is not None and custom_llm_provider in [
+            "gemini",
+            "vertex_ai",
+            "vertex_ai_beta",
+        ]:
+            old_schema = copy.deepcopy(
+                non_default_params["response_format"]
+                .get("json_schema", {})
+                .get("schema")
+            )
+            new_schema = _remove_additional_properties(schema=old_schema)
+            non_default_params["response_format"]["json_schema"]["schema"] = new_schema
     if "tools" in non_default_params and isinstance(
         non_default_params, list
     ):  # fixes https://github.com/BerriAI/litellm/issues/4933
@@ -3093,6 +3125,8 @@ def get_optional_params(
             optional_params["tools"] = tools
         if tool_choice is not None:
             optional_params["tool_choice"] = tool_choice
+        if response_format is not None:
+            optional_params["response_format"] = response_format
     elif custom_llm_provider == "ai21":
         ## check if unsupported param passed in
         supported_params = get_supported_openai_params(
@@ -4303,6 +4337,7 @@ def get_supported_openai_params(
             "frequency_penalty",
             "tools",
             "tool_choice",
+            "response_format",
         ]
     elif custom_llm_provider == "ai21":
         return [
@@ -10581,6 +10616,7 @@ class CustomStreamWrapper:
                 or self.custom_llm_provider == "vertex_ai"
                 or self.custom_llm_provider == "vertex_ai_beta"
                 or self.custom_llm_provider == "sagemaker"
+                or self.custom_llm_provider == "sagemaker_chat"
                 or self.custom_llm_provider == "gemini"
                 or self.custom_llm_provider == "replicate"
                 or self.custom_llm_provider == "cached_response"
