@@ -838,7 +838,7 @@ from .llms.databricks import DatabricksConfig, DatabricksEmbeddingConfig
 from .llms.predibase import PredibaseConfig
 from .llms.anthropic_text import AnthropicTextConfig
 from .llms.replicate import ReplicateConfig
-from .llms.cohere import CohereConfig
+from .llms.cohere.completion import CohereConfig
 from .llms.clarifai import ClarifaiConfig
 from .llms.ai21 import AI21Config
 from .llms.together_ai import TogetherAIConfig
@@ -856,7 +856,7 @@ from .llms.vertex_httpx import (
 from .llms.vertex_ai import VertexAITextEmbeddingConfig
 from .llms.vertex_ai_anthropic import VertexAIAnthropicConfig
 from .llms.vertex_ai_partner import VertexAILlama3Config
-from .llms.sagemaker import SagemakerConfig
+from .llms.sagemaker.sagemaker import SagemakerConfig
 from .llms.ollama import OllamaConfig
 from .llms.ollama_chat import OllamaChatConfig
 from .llms.maritalk import MaritTalkConfig
