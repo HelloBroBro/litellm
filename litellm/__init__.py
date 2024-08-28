@@ -848,14 +848,23 @@ from .llms.gemini import GeminiConfig
 from .llms.nlp_cloud import NLPCloudConfig
 from .llms.aleph_alpha import AlephAlphaConfig
 from .llms.petals import PetalsConfig
-from .llms.vertex_httpx import (
+from .llms.vertex_ai_and_google_ai_studio.vertex_and_google_ai_studio_gemini import (
     VertexGeminiConfig,
     GoogleAIStudioGeminiConfig,
     VertexAIConfig,
 )
-from .llms.vertex_ai import VertexAITextEmbeddingConfig
-from .llms.vertex_ai_anthropic import VertexAIAnthropicConfig
-from .llms.vertex_ai_partner import VertexAILlama3Config
+from .llms.vertex_ai_and_google_ai_studio.vertex_ai_non_gemini import (
+    VertexAITextEmbeddingConfig,
+)
+from .llms.vertex_ai_and_google_ai_studio.vertex_ai_anthropic import (
+    VertexAIAnthropicConfig,
+)
+from .llms.vertex_ai_and_google_ai_studio.vertex_ai_partner_models.llama3.transformation import (
+    VertexAILlama3Config,
+)
+from .llms.vertex_ai_and_google_ai_studio.vertex_ai_partner_models.ai21.transformation import (
+    VertexAIAi21Config,
+)
 from .llms.sagemaker.sagemaker import SagemakerConfig
 from .llms.ollama import OllamaConfig
 from .llms.ollama_chat import OllamaChatConfig
@@ -925,6 +934,7 @@ from .proxy.proxy_cli import run_server
 from .router import Router
 from .assistants.main import *
 from .batches.main import *
+from .rerank_api.main import *
 from .fine_tuning.main import *
 from .files.main import *
 from .scheduler import *
