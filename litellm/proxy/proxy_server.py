@@ -212,11 +212,6 @@ from litellm.proxy.pass_through_endpoints.pass_through_endpoints import (
 )
 from litellm.proxy.rerank_endpoints.endpoints import router as rerank_router
 from litellm.proxy.route_llm_request import route_request
-from litellm.proxy.secret_managers.aws_secret_manager import (
-    load_aws_kms,
-    load_aws_secret_manager,
-)
-from litellm.proxy.secret_managers.google_kms import load_google_kms
 from litellm.proxy.spend_tracking.spend_management_endpoints import (
     router as spend_management_router,
 )
@@ -257,6 +252,11 @@ from litellm.router import (
 from litellm.router import ModelInfo as RouterModelInfo
 from litellm.router import updateDeployment
 from litellm.scheduler import DefaultPriorities, FlowItem, Scheduler
+from litellm.secret_managers.aws_secret_manager import (
+    load_aws_kms,
+    load_aws_secret_manager,
+)
+from litellm.secret_managers.google_kms import load_google_kms
 from litellm.types.llms.anthropic import (
     AnthropicMessagesRequest,
     AnthropicResponse,
@@ -1765,6 +1765,15 @@ class ProxyConfig:
                     load_aws_secret_manager(use_aws_secret_manager=True)
                 elif key_management_system == KeyManagementSystem.AWS_KMS.value:
                     load_aws_kms(use_aws_kms=True)
+                elif (
+                    key_management_system
+                    == KeyManagementSystem.GOOGLE_SECRET_MANAGER.value
+                ):
+                    from litellm.secret_managers.google_secret_manager import (
+                        GoogleSecretManager,
+                    )
+
+                    GoogleSecretManager()
                 else:
                     raise ValueError("Invalid Key Management System selected")
             key_management_settings = general_settings.get(
@@ -3694,6 +3703,7 @@ async def embeddings(
         api_base = hidden_params.get("api_base", None) or ""
         response_cost = hidden_params.get("response_cost", None) or ""
         litellm_call_id = hidden_params.get("litellm_call_id", None) or ""
+        additional_headers: dict = hidden_params.get("additional_headers", {}) or {}
 
         fastapi_response.headers.update(
             get_custom_headers(
@@ -3706,6 +3716,7 @@ async def embeddings(
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
                 call_id=litellm_call_id,
                 request_data=data,
+                **additional_headers,
             )
         )
         await check_response_size_is_safe(response=response)
@@ -4081,6 +4092,7 @@ async def audio_transcriptions(
         api_base = hidden_params.get("api_base", None) or ""
         response_cost = hidden_params.get("response_cost", None) or ""
         litellm_call_id = hidden_params.get("litellm_call_id", None) or ""
+        additional_headers: dict = hidden_params.get("additional_headers", {}) or {}
 
         fastapi_response.headers.update(
             get_custom_headers(
@@ -4093,6 +4105,7 @@ async def audio_transcriptions(
                 model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
                 call_id=litellm_call_id,
                 request_data=data,
+                **additional_headers,
             )
         )
 
@@ -8010,8 +8023,13 @@ async def google_login(request: Request):
             # SSO providers do not allow stateless verification
             redirect_params = {}
             state = os.getenv("GENERIC_CLIENT_STATE", None)
+
             if state:
                 redirect_params["state"] = state
+            elif "okta" in generic_authorization_endpoint:
+                redirect_params["state"] = (
+                    uuid.uuid4().hex
+                )  # set state param for okta - required
             return await generic_sso.get_login_redirect(**redirect_params)  # type: ignore
     elif ui_username is not None:
         # No Google, Microsoft SSO
