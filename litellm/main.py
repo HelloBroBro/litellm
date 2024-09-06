@@ -22,18 +22,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from functools import partial
-from typing import (
-    Any,
-    BinaryIO,
-    Callable,
-    Dict,
-    List,
-    Literal,
-    Mapping,
-    Optional,
-    Type,
-    Union,
-)
+from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Type, Union
 
 import dotenv
 import httpx
@@ -93,8 +82,9 @@ from .llms import (
 from .llms.AI21 import completion as ai21
 from .llms.anthropic.chat import AnthropicChatCompletion
 from .llms.anthropic.completion import AnthropicTextCompletion
-from .llms.azure import AzureChatCompletion, _check_dynamic_azure_params
 from .llms.azure_text import AzureTextCompletion
+from .llms.AzureOpenAI.audio_transcriptions import AzureAudioTranscription
+from .llms.AzureOpenAI.azure import AzureChatCompletion, _check_dynamic_azure_params
 from .llms.bedrock import image_generation as bedrock_image_generation  # type: ignore
 from .llms.bedrock.chat import BedrockConverseLLM, BedrockLLM
 from .llms.bedrock.embed.embedding import BedrockEmbedding
@@ -104,7 +94,8 @@ from .llms.cohere import embed as cohere_embed
 from .llms.custom_llm import CustomLLM, custom_chat_llm_router
 from .llms.databricks import DatabricksChatCompletion
 from .llms.huggingface_restapi import Huggingface
-from .llms.openai import OpenAIChatCompletion, OpenAITextCompletion
+from .llms.OpenAI.audio_transcriptions import OpenAIAudioTranscription
+from .llms.OpenAI.openai import OpenAIChatCompletion, OpenAITextCompletion
 from .llms.predibase import PredibaseChatCompletion
 from .llms.prompt_templates.factory import (
     custom_prompt,
@@ -146,6 +137,7 @@ from .types.llms.openai import HttpxBinaryResponseContent
 from .types.utils import (
     AdapterCompletionStreamWrapper,
     ChatCompletionMessageToolCall,
+    FileTypes,
     HiddenParams,
     all_litellm_params,
 )
@@ -169,11 +161,13 @@ from litellm.utils import (
 ####### ENVIRONMENT VARIABLES ###################
 openai_chat_completions = OpenAIChatCompletion()
 openai_text_completions = OpenAITextCompletion()
+openai_audio_transcriptions = OpenAIAudioTranscription()
 databricks_chat_completions = DatabricksChatCompletion()
 anthropic_chat_completions = AnthropicChatCompletion()
 anthropic_text_completions = AnthropicTextCompletion()
 azure_chat_completions = AzureChatCompletion()
 azure_text_completions = AzureTextCompletion()
+azure_audio_transcriptions = AzureAudioTranscription()
 huggingface = Huggingface()
 predibase_chat_completions = PredibaseChatCompletion()
 codestral_text_completions = CodestralTextCompletion()
@@ -445,9 +439,6 @@ async def acompletion(
             )  # sets the logging event loop if the user does sync streaming (e.g. on proxy for sagemaker calls)
         return response
     except Exception as e:
-        verbose_logger.exception(
-            "litellm.main.py::acompletion() - Exception occurred - {}".format(str(e))
-        )
         custom_llm_provider = custom_llm_provider or "openai"
         raise exception_type(
             model=model,
@@ -616,9 +607,6 @@ def mock_completion(
     except Exception as e:
         if isinstance(e, openai.APIError):
             raise e
-        verbose_logger.exception(
-            "litellm.mock_completion(): Exception occured - {}".format(str(e))
-        )
         raise Exception("Mock completion response failed")
 
 
@@ -4620,7 +4608,7 @@ async def atranscription(*args, **kwargs) -> TranscriptionResponse:
 @client
 def transcription(
     model: str,
-    file: BinaryIO,
+    file: FileTypes,
     ## OPTIONAL OPENAI PARAMS ##
     language: Optional[str] = None,
     prompt: Optional[str] = None,
@@ -4710,7 +4698,7 @@ def transcription(
             or get_secret("AZURE_API_KEY")
         )  # type: ignore
 
-        response = azure_chat_completions.audio_transcriptions(
+        response = azure_audio_transcriptions.audio_transcriptions(
             model=model,
             audio_file=file,
             optional_params=optional_params,
@@ -4744,7 +4732,7 @@ def transcription(
             or litellm.openai_key
             or get_secret("OPENAI_API_KEY")
         )  # type: ignore
-        response = openai_chat_completions.audio_transcriptions(
+        response = openai_audio_transcriptions.audio_transcriptions(
             model=model,
             audio_file=file,
             optional_params=optional_params,
@@ -5125,9 +5113,6 @@ async def ahealth_check(
                 response = {}  # args like remaining ratelimit etc.
         return response
     except Exception as e:
-        verbose_logger.exception(
-            "litellm.ahealth_check(): Exception occured - {}".format(str(e))
-        )
         stack_trace = traceback.format_exc()
         if isinstance(stack_trace, str):
             stack_trace = stack_trace[:1000]

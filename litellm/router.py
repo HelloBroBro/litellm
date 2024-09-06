@@ -24,18 +24,7 @@ import traceback
 import uuid
 from collections import defaultdict
 from datetime import datetime
-from typing import (
-    Any,
-    BinaryIO,
-    Dict,
-    Iterable,
-    List,
-    Literal,
-    Optional,
-    Tuple,
-    TypedDict,
-    Union,
-)
+from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import httpx
 import openai
@@ -47,7 +36,8 @@ from litellm._logging import verbose_router_logger
 from litellm.assistants.main import AssistantDeleted
 from litellm.caching import DualCache, InMemoryCache, RedisCache
 from litellm.integrations.custom_logger import CustomLogger
-from litellm.llms.azure import get_azure_ad_token_from_oidc
+from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLogging
+from litellm.llms.AzureOpenAI.azure import get_azure_ad_token_from_oidc
 from litellm.router_strategy.least_busy import LeastBusyLoggingHandler
 from litellm.router_strategy.lowest_cost import LowestCostLoggingHandler
 from litellm.router_strategy.lowest_latency import LowestLatencyLoggingHandler
@@ -783,6 +773,10 @@ class Router:
                 }
             )
 
+            logging_obj: Optional[LiteLLMLogging] = kwargs.get(
+                "litellm_logging_obj", None
+            )
+
             rpm_semaphore = self._get_client(
                 deployment=deployment,
                 kwargs=kwargs,
@@ -797,11 +791,13 @@ class Router:
                     - If allowed, increment the rpm limit (allows global value to be updated, concurrency-safe)
                     """
                     await self.async_routing_strategy_pre_call_checks(
-                        deployment=deployment
+                        deployment=deployment, logging_obj=logging_obj
                     )
                     response = await _response
             else:
-                await self.async_routing_strategy_pre_call_checks(deployment=deployment)
+                await self.async_routing_strategy_pre_call_checks(
+                    deployment=deployment, logging_obj=logging_obj
+                )
                 response = await _response
 
             ## CHECK CONTENT FILTER ERROR ##
@@ -1335,7 +1331,7 @@ class Router:
                 self.fail_calls[model_name] += 1
             raise e
 
-    async def atranscription(self, file: BinaryIO, model: str, **kwargs):
+    async def atranscription(self, file: FileTypes, model: str, **kwargs):
         """
         Example Usage:
 
@@ -1379,7 +1375,7 @@ class Router:
             )
             raise e
 
-    async def _atranscription(self, file: BinaryIO, model: str, **kwargs):
+    async def _atranscription(self, file: FileTypes, model: str, **kwargs):
         try:
             verbose_router_logger.debug(
                 f"Inside _atranscription()- model: {model}; kwargs: {kwargs}"
@@ -3860,7 +3856,9 @@ class Router:
             if isinstance(_callback, CustomLogger):
                 response = _callback.pre_call_check(deployment)
 
-    async def async_routing_strategy_pre_call_checks(self, deployment: dict):
+    async def async_routing_strategy_pre_call_checks(
+        self, deployment: dict, logging_obj: Optional[LiteLLMLogging] = None
+    ):
         """
         For usage-based-routing-v2, enables running rpm checks before the call is made, inside the semaphore.
 
@@ -3875,8 +3873,22 @@ class Router:
         for _callback in litellm.callbacks:
             if isinstance(_callback, CustomLogger):
                 try:
-                    response = await _callback.async_pre_call_check(deployment)
+                    _ = await _callback.async_pre_call_check(deployment)
                 except litellm.RateLimitError as e:
+                    ## LOG FAILURE EVENT
+                    if logging_obj is not None:
+                        asyncio.create_task(
+                            logging_obj.async_failure_handler(
+                                exception=e,
+                                traceback_exception=traceback.format_exc(),
+                                end_time=time.time(),
+                            )
+                        )
+                        ## LOGGING
+                        threading.Thread(
+                            target=logging_obj.failure_handler,
+                            args=(e, traceback.format_exc()),
+                        ).start()  # log response
                     self._set_cooldown_deployments(
                         exception_status=e.status_code,
                         original_exception=e,
@@ -3885,6 +3897,20 @@ class Router:
                     )
                     raise e
                 except Exception as e:
+                    ## LOG FAILURE EVENT
+                    if logging_obj is not None:
+                        asyncio.create_task(
+                            logging_obj.async_failure_handler(
+                                exception=e,
+                                traceback_exception=traceback.format_exc(),
+                                end_time=time.time(),
+                            )
+                        )
+                        ## LOGGING
+                        threading.Thread(
+                            target=logging_obj.failure_handler,
+                            args=(e, traceback.format_exc()),
+                        ).start()  # log response
                     raise e
 
     def _generate_model_id(self, model_group: str, litellm_params: dict):

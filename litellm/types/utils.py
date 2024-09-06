@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from openai._models import BaseModel as OpenAIObject
+from openai.types.audio.transcription_create_params import FileTypes
 from openai.types.completion_usage import CompletionUsage
 from pydantic import ConfigDict, Field, PrivateAttr
 from typing_extensions import Callable, Dict, Required, TypedDict, override
@@ -503,7 +504,7 @@ class Usage(CompletionUsage):
         if "prompt_cache_hit_tokens" in params and isinstance(
             params["prompt_cache_hit_tokens"], int
         ):
-            self._cache_read_input_tokens = params["prompt_cache_hit_tokens=0"]
+            self._cache_read_input_tokens = params["prompt_cache_hit_tokens"]
 
         for k, v in params.items():
             setattr(self, k, v)
