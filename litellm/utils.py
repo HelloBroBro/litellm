@@ -745,6 +745,7 @@ def client(original_function):
             or kwargs.get("amoderation", False) == True
             or kwargs.get("atext_completion", False) == True
             or kwargs.get("atranscription", False) == True
+            or kwargs.get("arerank", False) == True
         ):
             # [OPTIONAL] CHECK MAX RETRIES / REQUEST
             if litellm.num_retries_per_request is not None:
@@ -9845,6 +9846,9 @@ class CustomStreamWrapper:
                         model_response.system_fingerprint = (
                             original_chunk.system_fingerprint
                         )
+                        model_response.citations = getattr(
+                            original_chunk, "citations", None
+                        )
                         print_verbose(f"self.sent_first_chunk: {self.sent_first_chunk}")
                         if self.sent_first_chunk is False:
                             model_response.choices[0].delta["role"] = "assistant"
@@ -10460,6 +10464,8 @@ class TextCompletionStreamWrapper:
 def mock_completion_streaming_obj(
     model_response, mock_response, model, n: Optional[int] = None
 ):
+    if isinstance(mock_response, litellm.MockException):
+        raise mock_response
     for i in range(0, len(mock_response), 3):
         completion_obj = Delta(role="assistant", content=mock_response[i : i + 3])
         if n is None:
@@ -10481,6 +10487,8 @@ def mock_completion_streaming_obj(
 async def async_mock_completion_streaming_obj(
     model_response, mock_response, model, n: Optional[int] = None
 ):
+    if isinstance(mock_response, litellm.MockException):
+        raise mock_response
     for i in range(0, len(mock_response), 3):
         completion_obj = Delta(role="assistant", content=mock_response[i : i + 3])
         if n is None:
