@@ -767,6 +767,9 @@ class AzureChatCompletion(BaseLLM):
         except Exception as e:
             status_code = getattr(e, "status_code", 500)
             error_headers = getattr(e, "headers", None)
+            error_response = getattr(e, "response", None)
+            if error_headers is None and error_response:
+                error_headers = getattr(error_response, "headers", None)
             raise AzureOpenAIError(
                 status_code=status_code, message=str(e), headers=error_headers
             )
@@ -1023,6 +1026,9 @@ class AzureChatCompletion(BaseLLM):
         except Exception as e:
             status_code = getattr(e, "status_code", 500)
             error_headers = getattr(e, "headers", None)
+            error_response = getattr(e, "response", None)
+            if error_headers is None and error_response:
+                error_headers = getattr(error_response, "headers", None)
             raise AzureOpenAIError(
                 status_code=status_code, message=str(e), headers=error_headers
             )
@@ -1032,9 +1038,9 @@ class AzureChatCompletion(BaseLLM):
         data: dict,
         model_response: EmbeddingResponse,
         azure_client_params: dict,
-        api_key: str,
         input: list,
         logging_obj: LiteLLMLoggingObj,
+        api_key: Optional[str] = None,
         client: Optional[AsyncAzureOpenAI] = None,
         timeout=None,
     ):
@@ -1078,13 +1084,13 @@ class AzureChatCompletion(BaseLLM):
         self,
         model: str,
         input: list,
-        api_key: str,
         api_base: str,
         api_version: str,
         timeout: float,
         logging_obj: LiteLLMLoggingObj,
         model_response: EmbeddingResponse,
         optional_params: dict,
+        api_key: Optional[str] = None,
         azure_ad_token: Optional[str] = None,
         client=None,
         aembedding=None,
@@ -1165,6 +1171,9 @@ class AzureChatCompletion(BaseLLM):
         except Exception as e:
             status_code = getattr(e, "status_code", 500)
             error_headers = getattr(e, "headers", None)
+            error_response = getattr(e, "response", None)
+            if error_headers is None and error_response:
+                error_headers = getattr(error_response, "headers", None)
             raise AzureOpenAIError(
                 status_code=status_code, message=str(e), headers=error_headers
             )
