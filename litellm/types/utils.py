@@ -67,6 +67,7 @@ class ModelInfo(TypedDict, total=False):
     input_cost_per_image: Optional[float]  # only for vertex ai models
     input_cost_per_audio_per_second: Optional[float]  # only for vertex ai models
     input_cost_per_video_per_second: Optional[float]  # only for vertex ai models
+    input_cost_per_second: Optional[float]  # for OpenAI Speech models
     output_cost_per_token: Required[float]
     output_cost_per_character: Optional[float]  # only for vertex ai models
     output_cost_per_token_above_128k_tokens: Optional[
@@ -79,6 +80,8 @@ class ModelInfo(TypedDict, total=False):
     output_vector_size: Optional[int]
     output_cost_per_video_per_second: Optional[float]  # only for vertex ai models
     output_cost_per_audio_per_second: Optional[float]  # only for vertex ai models
+    output_cost_per_second: Optional[float]  # for OpenAI Speech models
+
     litellm_provider: Required[str]
     mode: Required[
         Literal[
@@ -789,7 +792,7 @@ class EmbeddingResponse(OpenAIObject):
     model: Optional[str] = None
     """The model used for embedding."""
 
-    data: Optional[List] = None
+    data: List
     """The actual embedding value"""
 
     object: Literal["list"]
@@ -800,6 +803,7 @@ class EmbeddingResponse(OpenAIObject):
 
     _hidden_params: dict = {}
     _response_headers: Optional[Dict] = None
+    _response_ms: Optional[float] = None
 
     def __init__(
         self,
@@ -819,7 +823,7 @@ class EmbeddingResponse(OpenAIObject):
         if data:
             data = data
         else:
-            data = None
+            data = []
 
         if usage:
             usage = usage
