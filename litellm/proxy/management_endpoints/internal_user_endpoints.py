@@ -277,8 +277,9 @@ async def ui_get_available_role(
 
 
 def get_team_from_list(
-    team_list: Optional[List[LiteLLM_TeamTable]], team_id: str
-) -> Optional[LiteLLM_TeamTable]:
+    team_list: Optional[Union[List[LiteLLM_TeamTable], List[TeamListResponseObject]]],
+    team_id: str,
+) -> Optional[Union[LiteLLM_TeamTable, LiteLLM_TeamMembership]]:
     if team_list is None:
         return None
 
@@ -292,24 +293,20 @@ def get_team_from_list(
     "/user/info",
     tags=["Internal User management"],
     dependencies=[Depends(user_api_key_auth)],
-    response_model=UserInfoResponse,
+    # response_model=UserInfoResponse,
 )
 @management_endpoint_wrapper
 async def user_info(
     user_id: Optional[str] = fastapi.Query(
         default=None, description="User ID in the request parameters"
     ),
-    page: Optional[int] = fastapi.Query(
-        default=0,
-        description="Page number for pagination. Only use when view_all is true",
-    ),
-    page_size: Optional[int] = fastapi.Query(
-        default=25,
-        description="Number of items per page. Only use when view_all is true",
-    ),
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
     """
+    [10/07/2024]
+    Note: To get all users (+pagination), use `/user/list` endpoint.
+
+
     Use this to get user information. (user row + all user key info)
 
     Example request
@@ -338,8 +335,17 @@ async def user_info(
         team_list = []
         team_id_list = []
         # get all teams user belongs to
-        teams_1 = await prisma_client.get_data(
-            user_id=user_id, table_name="team", query_type="find_all"
+        # teams_1 = await prisma_client.get_data(
+        #     user_id=user_id, table_name="team", query_type="find_all"
+        # )
+        from litellm.proxy.management_endpoints.team_endpoints import list_team
+
+        teams_1 = await list_team(
+            http_request=Request(
+                scope={"type": "http", "path": "/user/info"},
+            ),
+            user_id=user_id,
+            user_api_key_dict=user_api_key_dict,
         )
 
         if teams_1 is not None and isinstance(teams_1, list):
@@ -359,6 +365,7 @@ async def user_info(
                     if team.team_id not in team_id_list:
                         team_list.append(team)
                         team_id_list.append(team.team_id)
+
         elif (
             user_api_key_dict.user_id is not None and user_id is None
         ):  # the key querying the endpoint is the one asking for it's teams
@@ -440,8 +447,11 @@ async def user_info(
                     key["team_alias"] = "None"
                 returned_keys.append(key)
 
+        _user_info = (
+            user_info.model_dump() if isinstance(user_info, BaseModel) else user_info
+        )
         response_data = UserInfoResponse(
-            user_id=user_id, user_info=user_info, keys=returned_keys, teams=team_list
+            user_id=user_id, user_info=_user_info, keys=returned_keys, teams=team_list
         )
 
         return response_data

@@ -2788,6 +2788,24 @@ def _remove_additional_properties(schema):
     return schema
 
 
+def _remove_strict_from_schema(schema):
+    if isinstance(schema, dict):
+        # Remove the 'additionalProperties' key if it exists and is set to False
+        if "strict" in schema:
+            del schema["strict"]
+
+        # Recursively process all dictionary values
+        for key, value in schema.items():
+            _remove_strict_from_schema(value)
+
+    elif isinstance(schema, list):
+        # Recursively process all items in the list
+        for item in schema:
+            _remove_strict_from_schema(item)
+
+    return schema
+
+
 def get_optional_params(
     # use the openai defaults
     # https://platform.openai.com/docs/api-reference/chat/create
@@ -2999,13 +3017,19 @@ def get_optional_params(
             from litellm.llms.vertex_ai_and_google_ai_studio.common_utils import (
                 _build_vertex_schema,
             )
+
             old_schema = copy.deepcopy(
                 non_default_params["response_format"]
                 .get("json_schema", {})
                 .get("schema")
             )
             new_schema = _remove_additional_properties(schema=old_schema)
-            new_schema = _build_vertex_schema(parameters=new_schema)
+            if isinstance(new_schema, list):
+                for item in new_schema:
+                    if isinstance(item, dict):
+                        item = _build_vertex_schema(parameters=item)
+            elif isinstance(new_schema, dict):
+                new_schema = _build_vertex_schema(parameters=new_schema)
             non_default_params["response_format"]["json_schema"]["schema"] = new_schema
     if "tools" in non_default_params and isinstance(
         non_default_params, list
@@ -3173,7 +3197,7 @@ def get_optional_params(
 
         if stream:
             optional_params["stream"] = stream
-            return optional_params
+            #return optional_params
         if max_tokens is not None:
             if "vicuna" in model or "flan" in model:
                 optional_params["max_length"] = max_tokens
@@ -3767,6 +3791,21 @@ def get_optional_params(
             optional_params=optional_params,
             model=model,
         )
+    elif custom_llm_provider == "hosted_vllm":
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
+        _check_valid_arg(supported_params=supported_params)
+        optional_params = litellm.HostedVLLMChatConfig().map_openai_params(
+            non_default_params=non_default_params,
+            optional_params=optional_params,
+            model=model,
+            drop_params=(
+                drop_params
+                if drop_params is not None and isinstance(drop_params, bool)
+                else False
+            ),
+        )
 
     elif custom_llm_provider == "groq":
         supported_params = get_supported_openai_params(
@@ -3926,24 +3965,36 @@ def get_optional_params(
             model=model, custom_llm_provider="azure"
         )
         _check_valid_arg(supported_params=supported_params)
-        verbose_logger.debug(
-            "Azure optional params - api_version: api_version={}, litellm.api_version={}, os.environ['AZURE_API_VERSION']={}".format(
-                api_version, litellm.api_version, get_secret("AZURE_API_VERSION")
+        if litellm.AzureOpenAIO1Config().is_o1_model(model=model):
+            optional_params = litellm.AzureOpenAIO1Config().map_openai_params(
+                non_default_params=non_default_params,
+                optional_params=optional_params,
+                model=model,
+                drop_params=(
+                    drop_params
+                    if drop_params is not None and isinstance(drop_params, bool)
+                    else False
+                ),
             )
-        )
-        api_version = (
-            api_version
-            or litellm.api_version
-            or get_secret("AZURE_API_VERSION")
-            or litellm.AZURE_DEFAULT_API_VERSION
-        )
-        optional_params = litellm.AzureOpenAIConfig().map_openai_params(
-            non_default_params=non_default_params,
-            optional_params=optional_params,
-            model=model,
-            api_version=api_version,  # type: ignore
-            drop_params=drop_params,
-        )
+        else:
+            verbose_logger.debug(
+                "Azure optional params - api_version: api_version={}, litellm.api_version={}, os.environ['AZURE_API_VERSION']={}".format(
+                    api_version, litellm.api_version, get_secret("AZURE_API_VERSION")
+                )
+            )
+            api_version = (
+                api_version
+                or litellm.api_version
+                or get_secret("AZURE_API_VERSION")
+                or litellm.AZURE_DEFAULT_API_VERSION
+            )
+            optional_params = litellm.AzureOpenAIConfig().map_openai_params(
+                non_default_params=non_default_params,
+                optional_params=optional_params,
+                model=model,
+                api_version=api_version,  # type: ignore
+                drop_params=drop_params,
+            )
     else:  # assume passing in params for text-completion openai
         supported_params = get_supported_openai_params(
             model=model, custom_llm_provider="custom_openai"
@@ -4409,6 +4460,8 @@ def get_supported_openai_params(
             "extra_headers",
             "extra_body",
         ]
+    elif custom_llm_provider == "hosted_vllm":
+        return litellm.HostedVLLMChatConfig().get_supported_openai_params(model=model)
     elif custom_llm_provider == "deepseek":
         return [
             # https://platform.deepseek.com/api-docs/api/create-chat-completion
@@ -4465,7 +4518,12 @@ def get_supported_openai_params(
     elif custom_llm_provider == "openai":
         return litellm.OpenAIConfig().get_supported_openai_params(model=model)
     elif custom_llm_provider == "azure":
-        return litellm.AzureOpenAIConfig().get_supported_openai_params()
+        if litellm.AzureOpenAIO1Config().is_o1_model(model=model):
+            return litellm.AzureOpenAIO1Config().get_supported_openai_params(
+                model=model
+            )
+        else:
+            return litellm.AzureOpenAIConfig().get_supported_openai_params()
     elif custom_llm_provider == "openrouter":
         return [
             "temperature",
@@ -7186,34 +7244,6 @@ class CustomStreamWrapper:
         except Exception as e:
             raise e
 
-    def handle_bedrock_stream(self, chunk):
-        return {
-            "text": chunk["text"],
-            "is_finished": chunk["is_finished"],
-            "finish_reason": chunk["finish_reason"],
-        }
-
-    def handle_sagemaker_stream(self, chunk):
-        if "data: [DONE]" in chunk:
-            text = ""
-            is_finished = True
-            finish_reason = "stop"
-            return {
-                "text": text,
-                "is_finished": is_finished,
-                "finish_reason": finish_reason,
-            }
-        elif isinstance(chunk, dict):
-            if chunk["is_finished"] is True:
-                finish_reason = "stop"
-            else:
-                finish_reason = ""
-            return {
-                "text": chunk["text"],
-                "is_finished": chunk["is_finished"],
-                "finish_reason": finish_reason,
-            }
-
     def handle_watsonx_stream(self, chunk):
         try:
             if isinstance(chunk, dict):
@@ -7361,6 +7391,10 @@ class CustomStreamWrapper:
             model_response._hidden_params = hidden_params
         model_response._hidden_params["custom_llm_provider"] = _logging_obj_llm_provider
         model_response._hidden_params["created_at"] = time.time()
+        model_response._hidden_params = {
+            **model_response._hidden_params,
+            **self._hidden_params,
+        }
 
         if (
             len(model_response.choices) > 0
