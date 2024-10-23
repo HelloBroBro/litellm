@@ -126,6 +126,7 @@ except (ImportError, AttributeError):
 os.environ["TIKTOKEN_CACHE_DIR"] = os.getenv(
     "CUSTOM_TIKTOKEN_CACHE_DIR", filename
 )  # use local copy of tiktoken b/c of - https://github.com/BerriAI/litellm/issues/1071
+from tiktoken import Encoding
 
 encoding = tiktoken.get_encoding("cl100k_base")
 from importlib import resources
@@ -213,13 +214,10 @@ prometheusLogger = None
 dynamoLogger = None
 s3Logger = None
 genericAPILogger = None
-clickHouseLogger = None
 greenscaleLogger = None
 lunaryLogger = None
 aispendLogger = None
-berrispendLogger = None
 supabaseClient = None
-liteDebuggerClient = None
 callback_list: Optional[List[str]] = []
 user_logger_fn = None
 additional_details: Optional[Dict[str, str]] = {}
@@ -609,7 +607,6 @@ def function_setup(  # noqa: PLR0915
 
 
 def client(original_function):  # noqa: PLR0915
-    global liteDebuggerClient
     rules_obj = Rules()
 
     def check_coroutine(value) -> bool:
@@ -1282,7 +1279,10 @@ def encode(model="", text="", custom_tokenizer: Optional[dict] = None):
         enc: The encoded text.
     """
     tokenizer_json = custom_tokenizer or _select_tokenizer(model=model)
-    enc = tokenizer_json["tokenizer"].encode(text)
+    if isinstance(tokenizer_json["tokenizer"], Encoding):
+        enc = tokenizer_json["tokenizer"].encode(text, disallowed_special=())
+    else:
+        enc = tokenizer_json["tokenizer"].encode(text)
     return enc
 
 
@@ -3049,8 +3049,8 @@ def get_optional_params(  # noqa: PLR0915
         )
         if litellm.vertex_ai_safety_settings is not None:
             optional_params["safety_settings"] = litellm.vertex_ai_safety_settings
-    elif (
-        custom_llm_provider == "vertex_ai" and model in litellm.vertex_anthropic_models
+    elif litellm.VertexAIAnthropicConfig.is_supported_model(
+        model=model, custom_llm_provider=custom_llm_provider
     ):
         supported_params = get_supported_openai_params(
             model=model, custom_llm_provider=custom_llm_provider
