@@ -984,10 +984,11 @@ from .llms.bedrock.common_utils import (
     AmazonAnthropicClaude3Config,
     AmazonCohereConfig,
     AmazonLlamaConfig,
-    AmazonStabilityConfig,
     AmazonMistralConfig,
     AmazonBedrockGlobalConfig,
 )
+from .llms.bedrock.image.amazon_stability1_transformation import AmazonStabilityConfig
+from .llms.bedrock.image.amazon_stability3_transformation import AmazonStability3Config
 from .llms.bedrock.embed.amazon_titan_g1_transformation import AmazonTitanG1Config
 from .llms.bedrock.embed.amazon_titan_multimodal_transformation import (
     AmazonTitanMultimodalEmbeddingG1Config,
@@ -1045,6 +1046,7 @@ from .llms.AzureOpenAI.azure import (
 
 from .llms.AzureOpenAI.chat.gpt_transformation import AzureOpenAIConfig
 from .llms.hosted_vllm.chat.transformation import HostedVLLMChatConfig
+from .llms.deepseek.chat.transformation import DeepSeekChatConfig
 from .llms.lm_studio.chat.transformation import LMStudioChatConfig
 from .llms.perplexity.chat.transformation import PerplexityChatConfig
 from .llms.AzureOpenAI.chat.o1_transformation import AzureOpenAIO1Config
