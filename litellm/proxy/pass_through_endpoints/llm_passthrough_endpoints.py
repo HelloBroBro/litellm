@@ -2,10 +2,8 @@
 What is this? 
 
 Provider-specific Pass-Through Endpoints
-"""
 
-"""
-1. Create pass-through endpoints for any LITELLM_BASE_URL/gemini/<endpoint> map to https://generativelanguage.googleapis.com/<endpoint>
+Use litellm with Anthropic SDK, Vertex AI SDK, Cohere SDK, etc.
 """
 
 import ast
@@ -180,8 +178,11 @@ async def anthropic_proxy_route(
 
     ## check for streaming
     is_streaming_request = False
-    if "stream" in str(updated_url):
-        is_streaming_request = True
+    # anthropic is streaming when 'stream' = True is in the body
+    if request.method == "POST":
+        _request_body = await request.json()
+        if _request_body.get("stream"):
+            is_streaming_request = True
 
     ## CREATE PASS-THROUGH
     endpoint_func = create_pass_through_route(
