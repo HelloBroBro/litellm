@@ -1373,6 +1373,7 @@ jobs:
           name: Install Dependencies
           command: |
             npm install -D @playwright/test
+            npm install @google-cloud/vertexai
             pip install "pytest==7.3.1"
             pip install "pytest-retry==1.6.3"
             pip install "pytest-asyncio==0.21.1"
@@ -1434,7 +1435,7 @@ jobs:
       - run:
           name: Run Playwright Tests
           command: |
-            npx playwright test --reporter=html --output=test-results
+            npx playwright test e2e_ui_tests/ --reporter=html --output=test-results
           no_output_timeout: 120m
       - store_test_results:
           path: test-results

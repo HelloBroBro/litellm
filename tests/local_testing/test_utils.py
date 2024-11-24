@@ -17,7 +17,7 @@ import pytest
 import litellm
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, headers
 from litellm.proxy.utils import (
-    _duration_in_seconds,
+    duration_in_seconds,
     _extract_from_regex,
     get_last_day_of_month,
 )
@@ -593,7 +593,7 @@ def test_duration_in_seconds():
     duration_until_next_month = next_month - current_time
     expected_duration = int(duration_until_next_month.total_seconds())
 
-    value = _duration_in_seconds(duration="1mo")
+    value = duration_in_seconds(duration="1mo")
 
     assert value - expected_duration < 2
 
@@ -1012,3 +1012,23 @@ def test_models_by_provider():
 
     for provider in providers:
         assert provider in models_by_provider.keys()
+
+
+@pytest.mark.parametrize(
+    "litellm_params, disable_end_user_cost_tracking, expected_end_user_id",
+    [
+        ({}, False, None),
+        ({"proxy_server_request": {"body": {"user": "123"}}}, False, "123"),
+        ({"proxy_server_request": {"body": {"user": "123"}}}, True, None),
+    ],
+)
+def test_get_end_user_id_for_cost_tracking(
+    litellm_params, disable_end_user_cost_tracking, expected_end_user_id
+):
+    from litellm.utils import get_end_user_id_for_cost_tracking
+
+    litellm.disable_end_user_cost_tracking = disable_end_user_cost_tracking
+    assert (
+        get_end_user_id_for_cost_tracking(litellm_params=litellm_params)
+        == expected_end_user_id
+    )
