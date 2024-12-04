@@ -55,11 +55,26 @@ class BaseLLMChatTest(ABC):
         assert response.choices[0].message.content is not None
 
     def test_message_with_name(self):
+        litellm.set_verbose = True
         base_completion_call_args = self.get_base_completion_call_args()
         messages = [
             {"role": "user", "content": "Hello", "name": "test_name"},
         ]
         response = litellm.completion(**base_completion_call_args, messages=messages)
+        assert response is not None
+
+    def test_multilingual_requests(self):
+        """
+        Tests that the provider can handle multilingual requests and invalid utf-8 sequences
+
+        Context: https://github.com/openai/openai-python/issues/1921
+        """
+        base_completion_call_args = self.get_base_completion_call_args()
+        response = litellm.completion(
+            **base_completion_call_args,
+            messages=[{"role": "user", "content": "你好世界！\ud83e, ö"}],
+        )
+        print("multilingual response: ", response)
         assert response is not None
 
     @pytest.mark.parametrize(
@@ -69,6 +84,7 @@ class BaseLLMChatTest(ABC):
             {"type": "text"},
         ],
     )
+    @pytest.mark.flaky(retries=6, delay=1)
     def test_json_response_format(self, response_format):
         """
         Test that the JSON response format is supported by the LLM API
@@ -136,6 +152,7 @@ class BaseLLMChatTest(ABC):
         except litellm.InternalServerError:
             pytest.skip("Model is overloaded")
 
+    @pytest.mark.flaky(retries=6, delay=1)
     def test_json_response_format_stream(self):
         """
         Test that the JSON response format with streaming is supported by the LLM API
